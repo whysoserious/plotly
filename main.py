@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from starlette.status import HTTP_400_BAD_REQUEST
 
 ALLOWED_EXTENSIONS = {".svg"}
-ALLOWED_MIME_TYPE = {"image/svg+xml", "application/svg+xml", "text/xml", "application/xml"}
+ALLOWED_MIME_TYPES = {"image/svg+xml", "application/svg+xml", "text/xml", "application/xml"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 @dataclass
@@ -50,3 +51,20 @@ def _validate_svg(file: UploadFile) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Filename is required",
         )
+    suffix = file.filename.lower().rsplit(".", 1)
+    if (len(suffix) != 2 or f".{suffix[1]}" not in ALLOWED_EXTENSIONS):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file extension. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
+        )
+    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+              status_code=status.HTTP_400_BAD_REQUEST,
+              detail=f"Unsupported content type: {file.content_type}",
+        )
+
+@app.post(
+    "/api/files",
+    response_model=FileMetadata,
+    status=status.HTTP_201_CREATED,
+)
