@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, UploadFile, status
 from pydantic import BaseModel
-from starlette.status import HTTP_400_BAD_REQUEST, HTTP_413_CONTENT_TOO_LARGE
+from starlette.status import HTTP_201_CREATED, HTTP_400_BAD_REQUEST, HTTP_413_CONTENT_TOO_LARGE
 
 ALLOWED_EXTENSIONS = {".svg"}
 ALLOWED_MIME_TYPES = {"image/svg+xml", "application/svg+xml", "text/xml", "application/xml"}
@@ -59,14 +59,14 @@ def _validate_svg(file: UploadFile) -> None:
         )
     if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
         raise HTTPException(
-              status_code=status.HTTP_400_BAD_REQUEST,
-              detail=f"Unsupported content type: {file.content_type}",
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported content type: {file.content_type}",
         )
 
 @app.post(
     "/api/files",
     response_model=FileMetadata,
-    status=status.HTTP_201_CREATED,
+    status_code=HTTP_201_CREATED,
 )
 async def upload_file(file: UploadFile) -> FileMetadata:
     _validate_svg(file)

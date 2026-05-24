@@ -139,11 +139,11 @@ plotly/
   - [x] Uruchomienie `uv run uvicorn main:app --reload`, podgląd `/docs`
   - **Czego się uczymy:** venv, pip/uv, struktura projektu, ASGI vs WSGI, dekorator `@app.get`, automatyczne docs.
 
-- [ ] **Krok 2: Upload pliku (POST /api/files)**
-  - [ ] Endpoint z `UploadFile`
-  - [ ] In-memory storage z UUID
-  - [ ] Walidacja MIME / rozszerzenie
-  - [ ] Pydantic response model
+- [x] **Krok 2: Upload pliku (POST /api/files)**
+  - [x] Endpoint z `UploadFile` (+ doinstalowanie `python-multipart`)
+  - [x] In-memory storage z UUID, dataclass `StoredFile`
+  - [x] Walidacja MIME / rozszerzenie + limit 10 MB
+  - [x] Pydantic response model `FileMetadata` + `response_model=...`
   - **Czego się uczymy:** `UploadFile`, async w FastAPI, Pydantic models, type hinty w sygnaturach, podstawy dependency injection.
 
 - [ ] **Krok 3: Endpointy odczytu (preview, content, list)**
@@ -199,6 +199,20 @@ plotly/
 - **FastAPI/ASGI:** `app = FastAPI()` to obiekt ASGI. `async def` vs `def` — FastAPI sam decyduje co odpalić w event loop, co w thread pool. Pułapka: sync I/O w `async def` blokuje loop.
 - **Uvicorn:** `uv run uvicorn main:app --reload`. Składnia `module:attribute`. `--reload` dzięki `watchfiles` z `[standard]`. `127.0.0.1` lokalnie, `0.0.0.0` będzie konieczne w Dockerze.
 - **Auto-docs:** `/docs` (Swagger UI), `/redoc` (ReDoc), `/openapi.json` (źródło prawdy). Generowane z type hintów i dekoratorów.
+
+### Krok 2 (upload pliku)
+- **Pydantic vs dataclass:** `BaseModel` na granicy systemu (waliduje + serializuje + schema OpenAPI), `@dataclass` wewnątrz (lekkie, bez walidacji). Generalna zasada: Pydantic na zewnątrz, dataclass w środku.
+- **`from __future__ import annotations`** — lazy evaluation type hintów (PEP 563). Idiom nowoczesnego Pythona, na 3.14 niedługo default (PEP 649/749).
+- **Mutable class default pitfall:** atrybut klasy `_files: dict = {}` jest **wspólny dla wszystkich instancji**. Inicjalizuj w `__init__`. Brak ekwiwalentu tej pułapki w Javie/Kotlinie.
+- **Union types z `|`** (PEP 604, od 3.10): `StoredFile | None` zamiast `Optional[StoredFile]`. Lowercase generics (`dict[...]`, `list[...]`) od 3.9 (PEP 585).
+- **`UploadFile`** — FastAPI rozpoznaje typ parametru i generuje multipart upload w `/docs`. Wymaga `python-multipart` (osobna zależność, FastAPI nie ciągnie).
+- **`@app.post(response_model=...)`** — filtrowanie pól zwracanych do klienta. Nawet jeśli funkcja zwróci więcej, wyjdzie tylko to co w modelu (mechanizm bezpieczeństwa).
+- **`async def` + `await file.read()`** — `UploadFile.read()` jest async, czyta ze spooled buffera. Reguła: sync I/O w `async def` = blokujesz event loop.
+- **HTTPException** z `fastapi.status` (stałe nazwane). `raise HTTPException(status_code=..., detail=...)` zamiast `ValueError`.
+- **`a or b` jako fallback** — idiom dla falsy values (None, "", 0). Analogiczne do `??` / `?:`.
+- **Konwencja `_prefix`** — funkcja "prywatna" modułu/klasy. Python tego nie wymusza; sygnał dla czytelnika i lintera.
+- **Czytanie tracebacku:** od dołu do góry. Ostatnia linia = typ wyjątku + komunikat (często z rozwiązaniem); głębsze ramki = gdzie wybuchło; górne = nasza wejściówka. Pythonowe wyjątki są gadatliwe — czytaj komunikat.
+- **Recovery venv:** uszkodzona biblioteka? `rm -rf .venv uv.lock && uv sync` to kanoniczna "reinstalacja" — analogia do `npm ci`.
 
 ## 10. Otwarte pytania / decyzje do podjęcia
 - **Limit rozmiaru uploadu:** Czy ograniczamy (np. 10 MB)? Domyślnie Starlette nie limituje. Decyzja w Kroku 2.
