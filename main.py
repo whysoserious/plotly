@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException, UploadFile, status
 from pydantic import BaseModel
-from starlette.status import HTTP_400_BAD_REQUEST
+from starlette.status import HTTP_400_BAD_REQUEST, HTTP_413_CONTENT_TOO_LARGE
 
 ALLOWED_EXTENSIONS = {".svg"}
 ALLOWED_MIME_TYPES = {"image/svg+xml", "application/svg+xml", "text/xml", "application/xml"}
@@ -68,3 +68,27 @@ def _validate_svg(file: UploadFile) -> None:
     response_model=FileMetadata,
     status=status.HTTP_201_CREATED,
 )
+async def upload_file(file: UploadFile) -> FileMetadata:
+    _validate_svg(file)
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"File too large. Max: {MAX_UPLOAD_BYTES} bytes",
+        )
+
+    stored = StoredFile(
+        id=str(uuid.uuid4()),
+        filename=file.filename or "unknown.svg",
+        content=content,
+        content_type=file.content_type or "image/svg+xml",
+    )
+    storage.add(stored)
+
+    return FileMetadata(
+        id=stored.id,
+        filename=stored.filename,
+        size=stored.size,
+        content_type=stored.content_type
+    )
