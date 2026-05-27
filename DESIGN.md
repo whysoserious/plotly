@@ -146,11 +146,11 @@ plotly/
   - [x] Pydantic response model `FileMetadata` + `response_model=...`
   - **Czego się uczymy:** `UploadFile`, async w FastAPI, Pydantic models, type hinty w sygnaturach, podstawy dependency injection.
 
-- [ ] **Krok 3: Endpointy odczytu (preview, content, list)**
-  - [ ] `GET /api/files`
-  - [ ] `GET /api/files/{id}/preview?n=500`
-  - [ ] `GET /api/files/{id}/content` z `Content-Type: image/svg+xml`
-  - [ ] `HTTPException` na 404
+- [x] **Krok 3: Endpointy odczytu (preview, content, list)**
+  - [x] `GET /api/files`
+  - [x] `GET /api/files/{id}/preview?n=500`
+  - [x] `GET /api/files/{id}/content` z `Content-Type: image/svg+xml`
+  - [x] `HTTPException` na 404
   - **Czego się uczymy:** path/query params, custom `Response`, HTTPException, status codes.
 
 - [ ] **Krok 4: Frontend (statyczny)**
@@ -213,6 +213,18 @@ plotly/
 - **Konwencja `_prefix`** — funkcja "prywatna" modułu/klasy. Python tego nie wymusza; sygnał dla czytelnika i lintera.
 - **Czytanie tracebacku:** od dołu do góry. Ostatnia linia = typ wyjątku + komunikat (często z rozwiązaniem); głębsze ramki = gdzie wybuchło; górne = nasza wejściówka. Pythonowe wyjątki są gadatliwe — czytaj komunikat.
 - **Recovery venv:** uszkodzona biblioteka? `rm -rf .venv uv.lock && uv sync` to kanoniczna "reinstalacja" — analogia do `npm ci`.
+
+### Krok 3 (endpointy odczytu)
+- **List comprehension:** `[expr for x in xs if cond]`. Wariantów: list, generator (leniwa), dict, set. Po jednym `if` i jednym `for` — zacznij myśleć o pętli (czytelność > zwięzłość).
+- **DTO pattern:** `StoredFile` (wewnętrzny, ma `content: bytes`) ≠ `FileMetadata` (publiczny, bez treści). `response_model` filtruje pola na granicy.
+- **Path vs query params:** FastAPI decyduje po sygnaturze — argument zgodny z `{x}` w ścieżce → path param; argument bez tego (zwłaszcza z defaultem) → query param. Brak osobnego DSL.
+- **`Query(...)` z `...` (Ellipsis)** — wymuszenie query parama bez defaulta. Pythonowy Ellipsis ma kilka semantycznie różnych użyć (slicing w NumPy, type stubs, FastAPI required).
+- **`response_class=PlainTextResponse`** — nadpisanie domyślnego JSON wrappera. Inne: `HTMLResponse`, `RedirectResponse`, `StreamingResponse`, `FileResponse`.
+- **`is None` zawsze, nie `== None`** — None to singleton, `is` to porównanie tożsamości. Klasy mogą mieć custom `__eq__` (NumPy, Pandas) → `== None` może dawać dziwne rezultaty. Ruff E711 to wyłapuje.
+- **`bytes.decode(encoding, errors=...)`** — strategie błędów: `strict` (default, wybucha), `replace` (U+FFFD), `ignore` (cicho wycina), `surrogateescape` (round-trip-safe). Do preview wybieramy `replace`.
+- **Slicing forgiving:** `text[:n]` nie wybucha gdy `n` > długość — zwraca po prostu cały string.
+- **`Response` jako terminal type** — FastAPI nie waliduje dalej, zwraca dosłownie co dostał. Schema OpenAPI uboższy.
+- **Pusta lista ≠ 404** — brak zasobów to legalna odpowiedź; 404 tylko gdy zasób identyfikowalny przez ID nie istnieje.
 
 ## 10. Otwarte pytania / decyzje do podjęcia
 - **Limit rozmiaru uploadu:** Czy ograniczamy (np. 10 MB)? Domyślnie Starlette nie limituje. Decyzja w Kroku 2.

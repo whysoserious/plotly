@@ -1,15 +1,29 @@
 from __future__ import annotations
-
-import uuid
 from dataclasses import dataclass
+import uuid
 
 from fastapi import FastAPI, HTTPException, UploadFile, status
+
+from fastapi import Response
+from fastapi.requests import HTTPConnection
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from starlette.status import HTTP_201_CREATED, HTTP_400_BAD_REQUEST, HTTP_413_CONTENT_TOO_LARGE
+from starlette.status import (
+    HTTP_201_CREATED,
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_413_CONTENT_TOO_LARGE,
+)
 
 ALLOWED_EXTENSIONS = {".svg"}
-ALLOWED_MIME_TYPES = {"image/svg+xml", "application/svg+xml", "text/xml", "application/xml"}
+ALLOWED_MIME_TYPES = {
+    "image/svg+xml",
+    "application/svg+xml",
+    "text/xml",
+    "application/xml",
+}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
 
 @dataclass
 class StoredFile:
@@ -22,11 +36,13 @@ class StoredFile:
     def size(self) -> int:
         return len(self.content)
 
+
 class FileMetadata(BaseModel):
     id: str
     filename: str
     size: int
     content_type: str
+
 
 class FileStorage:
     def __init__(self) -> None:
@@ -41,6 +57,7 @@ class FileStorage:
     def list_all(self) -> list[StoredFile]:
         return list(self._files.values())
 
+
 storage = FileStorage()
 app = FastAPI(title="Plotly", version="0.1.0")
 
@@ -52,7 +69,7 @@ def _validate_svg(file: UploadFile) -> None:
             detail="Filename is required",
         )
     suffix = file.filename.lower().rsplit(".", 1)
-    if (len(suffix) != 2 or f".{suffix[1]}" not in ALLOWED_EXTENSIONS):
+    if len(suffix) != 2 or f".{suffix[1]}" not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST,
             detail=f"Unsupported file extension. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
@@ -62,6 +79,7 @@ def _validate_svg(file: UploadFile) -> None:
             status_code=HTTP_400_BAD_REQUEST,
             detail=f"Unsupported content type: {file.content_type}",
         )
+
 
 @app.post(
     "/api/files",
@@ -90,5 +108,43 @@ async def upload_file(file: UploadFile) -> FileMetadata:
         id=stored.id,
         filename=stored.filename,
         size=stored.size,
-        content_type=stored.content_type
+        content_type=stored.content_type,
+    )
+
+
+@app.get("/api/files", response_model=list[FileMetadata])
+async def list_files() -> list[FileMetadata]:
+    return [
+        FileMetadata(
+            id=f.id, filename=f.filename, size=f.size, content_type=f.content_type
+        )
+        for f in storage.list_all()
+    ]
+
+
+@app.get("/api/files/{file_id}/preview", response_class=PlainTextResponse)
+async def get_file_preview(file_id: str, n: int = 500) -> str:
+    stored = storage.get(file_id)
+    if stored is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"File {file_id} not found"
+        )
+    if n < 1:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="Parameter n must be >= 1",
+        )
+    text = stored.content.decode("utf-8", errors="replace")
+    return text[:n]
+
+
+@app.get("/api/files/{file_id}/content")
+async def get_file_content(file_id: str) -> Response:
+    stored = storage.get(file_id)
+    if stored is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"file {file_id} not found"
+        )
+    return Response(
+        content=stored.content, media_type=stored.content_type or "image/svg+xml"
     )
