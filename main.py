@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, status
 from fastapi import Response
 from fastapi.requests import HTTPConnection
 from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.status import (
     HTTP_201_CREATED,
@@ -148,3 +149,5 @@ async def get_file_content(file_id: str) -> Response:
     return Response(
         content=stored.content, media_type=stored.content_type or "image/svg+xml"
     )
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
