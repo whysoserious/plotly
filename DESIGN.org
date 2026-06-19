@@ -5,7 +5,7 @@
 #+begin_quote
 *Zmiana kierunku.* Projekt był wcześniej webowym backendem w Pythonie (FastAPI + Docker).
 Teraz robimy *natywne TUI w Rust*, komunikujące się *bezpośrednio przez port szeregowy*
-z ploterem *iDraw 2.0* (firmware DrawCore). Stary kierunek: patrz sekcja *16. Historia*.
+z ploterem *iDraw 2.0* (firmware DrawCore).
 
 *Język:* dokument po polsku; *cała aplikacja po angielsku* (kod, komentarze, teksty UI, logi).
 *Tryb pracy:* kod piszę bezpośrednio w plikach (bez trybu tutora). Patrz ~CLAUDE.md~.
@@ -618,21 +618,26 @@ od razu*. Zamiast tego:
   jednoklawiszowe — sekcja 8!); wyślij dowolną linię, pokaż odpowiedź. /Test:/ wpisz ~M3 S100~
   — ~S~ NIE wywołuje STOP; w mocku widać ~->~/~<-~. /Auto:/ U: router wejścia — w trybie tekst
   ~S~ trafia do bufora, w trybie nawigacji ~S~ = ~Command::EStop~.
-- [ ] *1.6 ✱ Jog strzałkami + zmiana kroku.* ~Jog{dx,dy}~ przez ~G91 G1~ *z transformem osi
-  z 2.3* (fallback; ~$J=~ tylko jeśli spike ✔); ~+~/~-~ zmienia krok 0.1/1/5/10 mm; koalescencja
-  przy trzymaniu. /Test:/ ✱ strzałka w prawo → karetka jedzie w +X *logicznym* (nie odbitym!);
-  krok się zmienia. /Auto:/ U: transform „logiczny dx,dy → G-code X,Y" (zamiana+znaki, 2.3) —
-  tablica przypadków; I: ~Jog~ emituje przeliczoną linię ~G91 G1~.
+- [ ] *1.6 ✱ Jog strzałkami + zmiana kroku.* ~geometry.rs~: *wprowadź* ~Transform~ (część
+  liniowa ~L~ „logiczny↔G-code": zamiana X↔Y, znaki, skala — stałe ze spike'u 0.7) z metodą
+  ~map_vector(dx,dy)~ (delta mm → drut; translacja origin się skraca). ~Jog{dx,dy}~ wysyła
+  ~G91 G1~ przez ~map_vector~ (fallback; ~$J=~ tylko jeśli spike ✔); ~+~/~-~ zmienia krok
+  0.1/1/5/10 mm; koalescencja przy trzymaniu. /Test:/ ✱ strzałka w prawo → karetka jedzie w +X
+  *logicznym* (nie odbitym!); krok się zmienia. /Auto:/ U: ~Transform::map_vector~ (zamiana+
+  znaki, 2.3) — tablica przypadków; I: ~Jog~ emituje przeliczoną linię ~G91 G1~.
 
 ** Faza 2 — SVG → Plan → rysowanie + stop
 - [ ] *2.1 Parsing SVG → polilinie mm.* ~plan/svg.rs~: ~usvg~ + flatten ~kurbo~ z tolerancją;
   rozdzielczość style/transform/~use~. /Test:/ ~--simulate logo.svg~ + ~--log-level debug~ →
   „N ścieżek, M punktów". /Auto:/ U: znany SVG (kwadrat 10×10 mm) → 4 wierzchołki w mm; łuk →
   polilinia w tolerancji. I: plik testowy w ~tests/fixtures/~.
-- [ ] *2.2 Geometria: fit/pozycja + transform logiczny↔G-code.* ~geometry.rs~: mm/inch,
-  fit do pola profilu, origin; *centralny transform z 2.3/2.4* (zamiana X↔Y, znaki, skala).
-  /Test:/ DEBUG pokazuje bbox po fit. /Auto:/ U: round-trip ~logical→wire→logical~ = identyczność;
-  punkt poza polem wykrywany; znany punkt mapuje się na oczekiwane wire-XY (oracle ze spike'u).
+- [ ] *2.2 Geometria: fit/pozycja + ~map_point~ na bazie ~Transform~ z 1.6.* ~geometry.rs~:
+  mm/inch, fit do pola profilu, origin; *rozszerz ~Transform~ z 1.6* o ~map_point(x,y)~ (punkt
+  absolutny → drut: ta sama część liniowa ~L~ + translacja ~t~ = origin po ~$H~ + offset fit,
+  2.3/2.4). Nie budujesz transformu od zera — dokładasz warstwę punktową na istniejące
+  ~map_vector~. /Test:/ DEBUG pokazuje bbox po fit. /Auto:/ U: round-trip ~logical→wire→logical~
+  = identyczność; ~map_vector~ = liniowa część ~map_point~ (spójność ~L~); punkt poza polem
+  wykrywany; znany punkt → oczekiwane wire-XY (oracle ze spike'u).
 - [ ] *2.3 Budowa ~Plan~ (~Vec<Op>~) + subdivision.* ~plan/mod.rs~: ~PenUp/PenDown/MoveTo/
   Dwell/SetFeed~; dziel długie segmenty na krótkie op (cap długości/czasu — sekcja 6). /Test:/
   DEBUG: liczba op, max długość segmentu ≤ cap. /Auto:/ U: segment 100 mm przy cap 5 mm → ≥20 op;

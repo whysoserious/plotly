@@ -3,7 +3,7 @@
 ## Tryb pracy (WAŻNE — nadpisuje zachowania domyślne)
 - **NIE używaj skilla `python-tutor`.** Projekt zmienił kierunek z webowego backendu w Pythonie na **TUI w Rust** sterujące ploterem iDraw 2.0. Tryb tutora jest wyłączony.
 - **Piszę kod za użytkownika** — tworzę i edytuję pliki źródłowe bezpośrednio (cargo, moduły, testy). To nie jest projekt „przepisywania snippetów z czatu".
-- Źródłem prawdy o projekcie jest **`DESIGN.org`** — czytaj go na początku pracy. (Stary `DESIGN.md` to poprzedni, nieaktualny kierunek — patrz „Historia" w DESIGN.org.)
+- Źródłem prawdy o projekcie jest **`DESIGN.org`** — czytaj go na początku pracy. (Stary `DESIGN.md` to poprzedni, nieaktualny kierunek — zarchiwizowany.)
 
 ## Rytm pracy nad planem (sekcja 14 DESIGN.org) — kontrakt „done"
 Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po napisaniu kodu:
@@ -39,8 +39,8 @@ Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po na
 
 ## Commity
 - Po angielsku; jeden krok planu = jeden commit (patrz „Rytm pracy").
-- Stopka commita: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- Commituję/pushuję tylko gdy użytkownik o to poprosi (krok planu domyka się jego „tak").
+- Commituję/pushuję tylko gdy użytkownik o to poprosi (krok planu domyka się jeg
+o „tak").
 
 ## Materiał referencyjny (read-only)
 - Protokół iDrawa: `inkscape extensions/idraw_deps/drawcore_plotink/` (`drawcore_serial.py`, `drawcore_motion.py`) + `idraw_deps/idraw2_0internal/` + `idraw2_0_conf.py`. Dokumentacja firmware DrawCore i algorytmów (CoreXY, transform osi, dripfeed, bounds-clip).
@@ -48,4 +48,4 @@ Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po na
 
 ## Czego nie ruszać bez powodu
 - `inkscape extensions/` — materiał referencyjny.
-- Stary kod Pythona (`main.py`, `static/`, `pyproject.toml`, `uv.lock`, `.venv/`, `__pycache__/`) i `DESIGN.md` — zarchiwizowany kierunek (DESIGN.org „Historia").
+- Stary kod Pythona (`main.py`, `static/`, `pyproject.toml`, `uv.lock`, `.venv/`, `__pycache__/`) i `DESIGN.md` — zarchiwizowany kierunek.
