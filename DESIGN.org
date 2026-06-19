@@ -1,0 +1,724 @@
+#+TITLE: Plotly — TUI w Rust do sterowania ploterem iDraw 2.0
+#+OPTIONS: toc:2 num:nil
+#+STARTUP: indent content
+
+#+begin_quote
+*Zmiana kierunku.* Projekt był wcześniej webowym backendem w Pythonie (FastAPI + Docker).
+Teraz robimy *natywne TUI w Rust*, komunikujące się *bezpośrednio przez port szeregowy*
+z ploterem *iDraw 2.0* (firmware DrawCore). Stary kierunek: patrz sekcja *16. Historia*.
+
+*Język:* dokument po polsku; *cała aplikacja po angielsku* (kod, komentarze, teksty UI, logi).
+*Tryb pracy:* kod piszę bezpośrednio w plikach (bez trybu tutora). Patrz ~CLAUDE.md~.
+
+*Konwencja faktów (sekcja 2 i dalej):* ✔ = potwierdzone w referencyjnym sterowniku
+(~drawcore_serial.py~ / ~drawcore_motion.py~ / ~motion.py~ / ~dripfeed.py~ / ~idraw.py~);
+❓ = *założenie* („czysty Grbl") do weryfikacji na sprzęcie (spike w Fazie 0).
+Tych dwóch nie wolno mylić — patrz 2.3 i sekcja 15.
+#+end_quote
+
+* 1. Cel aplikacji
+Terminalowa aplikacja (TUI) do sterowania ploterem rysującym *iDraw 2.0*:
+- ładuje plik *SVG* i rysuje go,
+- *tryb pisania* — renderuje zadany tekst czcionką single-stroke / systemową,
+- *tryb interaktywny* — jazda strzałkami + podnoszenie/opuszczanie pióra z klawiatury,
+- pełna kontrola: stop / stop po czasie / stop + pen up po czasie, pauza, wznowienie,
+- *bardzo dokładne logowanie* wszystkiego do pliku (do wklejenia do Claude przy debugowaniu),
+- *zapis stanu druku i wznawianie* po ubiciu procesu / zaniku zasilania,
+- parytet funkcji z rozszerzeniem „iDraw 2.0 Control" + pomysły z „AxiDraw Control".
+
+* 2. Sprzęt i protokół (iDraw 2.0 / DrawCore)
+iDraw 2.0 NIE jest EiBotBoardem (EBB) jak AxiDraw. Jego firmware *DrawCore* to dialekt
+*G-code w stylu Grbl*. *Uwaga metodologiczna:* część poniższego to ✔ fakty odczytane
+z referencyjnego sterownika Inkscape, a część to ❓ *nasze założenia* o „czystym Grblu",
+których ten sterownik NIE potwierdza (on jedzie inną, starszą ścieżką — patrz 2.3).
+Referencja dowodzi tylko jednej konkretnej drogi sterowania; nasza prostsza droga
+(mm + ~G90~ absolutne + planowanie na płytce) to *zakład do potwierdzenia w Fazie 0*.
+
+** 2.1 Połączenie
+| Parametr | Wartość |
+|----------+---------|
+| Układ USB-serial | CH340 (QinHeng) |
+| VID:PID | ~1A86:7523~ *lub* ~1A86:8040~ |
+| Baud | *115200*, 8N1 |
+| Sygnały | *RTS = false, DTR = false* (inaczej płytka się resetuje) |
+| Handshake przy otwarciu | wyślij ~$B\r~, odczytaj 2 linie, ~reset_input_buffer~, potem ~v\r~ (małe!) |
+| Identyfikacja | odpowiedź na ~v~/~V~ zaczyna się od ~"DrawCore V…"~ |
+| Terminator komend | ~\r~ |
+| Odpowiedź OK | małe ~ok~ (Grbl); błąd: ~error:<n>~ |
+
+** 2.2 Komendy (mapa protokołu)
+*UWAGA — to jest nasz docelowy, „czysty" model (❓), nie to, co robi referencja.*
+Chcemy: tryb metryczny ~G21~ + *współrzędne absolutne ~G90~ w mm*, a kinematykę CoreXY
+i planowanie przyspieszeń zostawić firmware'owi. *To by ogromnie upraszczało hosta* — ale
+*referencyjny sterownik robi inaczej* (~G91~ względne, jednostki krokowe, transform osi na
+hoście, planowanie trajektorii na hoście). Szczegóły i konsekwencje: *2.3*. Dopóki spike
+(Faza 0) nie potwierdzi, że firmware przyjmuje ~G21~/~G90~/mm i sam planuje — *zakładamy,
+że może być potrzebna ścieżka referencyjna* i nie budujemy nieodwracalnie na „czystym Grblu".
+
+| Funkcja | Komenda | ✔/❓ | Uwagi |
+|---------+---------+------+-------|
+| Ruch liniowy XY | ~G1 X<x> Y<y> F<feed>~ | ❓ | nasz cel: ~G90~ abs w mm. *Referencja: ~G91~ względne, jednostki krokowe, osie zamienione/odbite* (2.3) |
+| Szybki przejazd | ~G0 X<x> Y<y>~ | ❓ | pen-up transit; w referencji nieużywane (jest zwykłe ~G1~) |
+| Pen DOWN | ~G1 G90 Z<down> F<rate>~ | ✔ | ~Z=5~ w dół; ~rate~≈5000. *Po nim leci jeszcze ~G1 F<feed_xy>~* (ustawia feed XY!) |
+| Pen UP | ~G1 G90 Z<up> F<rate>~ | ✔ | ~Z=0.5~ w górę (większe Z = niżej). Też + ~G1 F<feed_xy>~ |
+| Toggle pen | ~$TP<up>,<down>~ | ✔ | np. ~$TP0.5,5.0~ (poprzedzone ~G90 G1 F<speed>~) |
+| Laser / serwo PWM | ~G1 F<f> M3 S<val>~ / ~M5~ | ✔/❓ | ~M3 S~ ✔ (PWM); ~M5~ ❓ |
+| Dwell | ~G4 P<sekundy>~ | ❓ | w referencji *zakomentowane* (no-op); P=sekundy prawdopodobne |
+| Homing | ~$H~ | ✔ | cykl bazowania na *krańcówkach* — iDraw to ma! |
+| Usypianie silników | ~$SLP~ | ✔ | „disable motors" |
+| Status (realtime) | ~?~ | ❓ | raport + ~MPos~ — *w referencji NIEUŻYWANE*; format niżej to założenie Grbla |
+| Pauza (realtime) | ~!~ | ❓ | feed-hold — *w referencji NIEUŻYWANE* (pauza kooperatywna, 2.3) |
+| Wznów (realtime) | =~= | ❓ | cycle-start — *nieużywane w referencji* |
+| Abort (realtime) | ~0x18~ (Ctrl-X) | ❓ | soft-reset — *nieużywane*; po nim zwykle ALARM → ~$H~/~$X~ |
+| Jog-cancel (realtime) | ~0x85~ | ❓ | *nieużywane w referencji* |
+| Jog | ~$J=G91 X<d> Y<d> F<f>~ | ❓ | *nieużywane*; fallback: ~G91 G1 ...~ (też transform osi!) |
+| Query pen | ~$QP~ | ✔ | ~0~ = down |
+| Przycisk / handshake | ~$B~ | ✔ | też „czy wciśnięto przycisk" (kooperatywna pauza) |
+| Nickname | ~$QT~ / ~$ST=<name>~ | ✔ | firmware ≥ 2.13 |
+| Ustawienia Grbl | ~$$~ | ✔ | przez ~query_all~; steps/mm, rate, accel |
+| Wersja | ~v~ / ~V~ | ✔ | ~"DrawCore V2.xx"~ |
+
+Format raportu ~?~ (*założenie* formatu Grbla — niepotwierdzone; pola rozdzielone ~|~):
+#+begin_example
+<Run|MPos:120.500,80.000,5.000|FS:2000,0>
+#+end_example
+
+#+begin_quote
+*Najwyższe ryzyko projektu:* komendy realtime (~!~, =~=, ~?~, ~0x18~, ~0x85~) i ~$J=~
+*nie występują w referencyjnym sterowniku* — to czyste założenia. Na nich stoją: live-pozycja,
+progress z ~?~, „Stop now", jog. Jeśli firmware ich nie ma, sekcje 4/8/9/3.6 wymagają modelu
+kooperatywnego (2.3). *Zweryfikować w Fazie 0, zanim cokolwiek na nich zbudujemy.*
+Semantyka osi Z (down ~Z=5~ > up ~Z=0.5~ → większe Z = niżej) jest ✔, ale i ją potwierdzić.
+#+end_quote
+
+** 2.3 Jak NAPRAWDĘ robi to referencja (fakty ✔ — i konsekwencje)
+To jest udokumentowana, działająca ścieżka. Jeśli „czysty Grbl" (2.2) nie wypali, *to jest
+nasz fallback* — i tak czy siak musimy znać ten model dla wznawiania i transformu osi.
+
+1. *Ruchy XY są względne (~G91~), nie absolutne.* Każdy segment: ~G1 G91 X.. Y..~
+   (~drawcore_motion.py:65,74~; ~dripfeed.feed_sm~). ~G90~ w referencji leci *tylko dla Z*
+   i do ustawienia feedrate.
+2. *Osie są zamienione i odbite.* ~doXYMove~ (~drawcore_motion.py:61-65~) liczy
+   ~X=-(dx+dy)/2~, ~Y=(dx-dy)/2~ i wysyła ~G1 G91 X<Y> Y<X>~ → na drucie
+   *G-code X = −(logiczne Y), G-code Y = −(logiczne X)*. Potwierdza ~go_to_position(-f_y,-f_x)~
+   (~idraw.py:572~) i ~machine_origin~ (po ~$H~ jedzie ~+y_max~; ~idraw.py:529-530~).
+3. *To nie są milimetry.* ~G21~ nie jest wysyłane *nigdzie*. Współrzędne wychodzą ze
+   ~step_scale = native_res_factor (1270) [×2]~ kroków/cal (~idraw.py:987,997~) z dodatkowym
+   ~/100~ i kwantyzacją do kroków (~motion.py:523-525~). Host *liczy kroki natywnych osi
+   CoreXY* (~motor_dist1=Δx+Δy~, ~motor_dist2=Δx−Δy~) — dokładnie to, co „czysty Grbl"
+   chciał zrzucić na firmware.
+4. *Flow control jest open-loop, czasowy.* Host wysyła segment i ~time.sleep(move_time)~
+   (~dripfeed.py:127-129~); planowanie trajektorii (przyśpieszenia) robi *host*
+   (~motion.py~, ~compute_segment~/~trajectory~), nie płytka. ~command()~ czyta jedno ~ok~ =
+   *„przyjęto do bufora"*, nie „narysowano".
+5. *Pauza/stop są kooperatywne.* Sprawdzane *między segmentami* przez fizyczny przycisk /
+   Ctrl-C (~idraw.py~ ~pause_check~, ~plot_status.resume.check_button~; wołane w pętli
+   ~dripfeed.feed~). Brak feed-hold ~!~.
+
+*Konsekwencja dla nas:* niezależnie od wyniku spike'u musimy mieć jawny *transform
+„układ logiczny (SVG, mm) ↔ układ G-code maszyny"* (zamiana X↔Y, znaki, skala, origin po
+homingu). Bez tego rysunek wyjdzie obrócony/odbity/przeskalowany. Patrz też sekcja 6
+(wznawianie zależy od tego transformu) i ~$$~ (~steps/mm~ do skali).
+
+** 2.4 Granice pola i origin — to robi HOST, nie firmware (fakty ✔)
+Dwie powiązane rzeczy, które łatwo błędnie przypisać płytce. *Firmware nie pilnuje granic
+i nie ma trwałego układu absolutnego poza chwilą po ~$H~* — ruchy są względne (~G91~) i w
+jednostkach krokowych (2.3), więc płytka wykonuje zadany delta-ruch *na ślepo*.
+
+*A. Bounds-check = wyłącznie host, dwupoziomowo (✔):*
+1. *Klipowanie planu przed drukiem* — ~boundsclip.clip_at_bounds()~. Host *geometrycznie
+   przycina* każdą ścieżkę do prostokąta ~(0,0)–(x_max,y_max)~: dzieli subpath, wyrzuca
+   fragmenty poza polem (~point_in_bounds~/~clip_segment~), opcjonalnie klipuje też do
+   rozmiaru strony. Ostrzeżenie tylko gdy ruch przekracza *fizyczne* granice o > ~warn_tol~
+   i w kierunku dodatnim (nie przy 0).
+2. *Klamrowanie każdego ruchu w locie* — ~motion.py:502-509~ (~checkLimitsTol~): każdy cel
+   przycinany do ~bounds~ (tolerancja ≈1 krok) tuż przed policzeniem segmentu, z warningiem
+   ~'bounds'~. *Uwaga:* działa tylko gdy ~ignore_limits=False~. *Jog/walk ręczny woła
+   ~go_to_position(..., ignore_limits=True)~ (~idraw.py:572~) → NIE jest klamrowany* —
+   ręczny najazd może walnąć w ramę.
+Jedyna ochrona sprzętowa to krańcówki, używane *tylko* w cyklu ~$H~ (nie podczas rysowania).
+*Nasza implementacja:* trzymamy *absolutną pozycję logiczną w mm* i sprawdzamy ją przed
+każdym ~Op~ względem pola z profilu (sekcja 10). Replikujemy oba poziomy: clip planu
+(~plan/~) + runtime clamp/odmowa dla jogu (~driver~/~geometry~). Firmware nas nie uratuje.
+
+*B. „Idź do 0,0" / SetOrigin = ~$H~ + offset modelu (✔):*
+Nie ma komendy „jedź do absolutnego 0,0". Referencja (~idraw.py:528-530~, tryb
+~machine_origin~) robi: ~$H~ (homing na krańcówkach → *róg sprzętowy*) → ~doMove(y_max·25.4,
+0, …)~ (*względny* ~G91~ przejazd ~+y_max~ z rogu do origin logicznego) → ~$SLP~. Czyli
+*róg sprzętowy ≠ origin logiczny*, stąd dodatkowy przejazd o pełny travel.
+Host *nie odczytuje pozycji* (~?~/~MPos~ nieużywane) — zna ją wyłącznie przez *dead-reckoning*:
+akumuluje wszystkie ruchy względne w ~pen.phys.xpos/ypos~ (~idraw.py:568-569~), startując od
+punktu zadanego homingiem. To *host definiuje*, gdzie jest 0,0, i sam to pilnuje — dlatego
+zanik prądu wymaga ponownego ~$H~ (sekcja 6).
+*Nasza implementacja:* ~SetOrigin~/go-to-0,0 = ~$H~ → przejazd offsetowy zależny od modelu →
+od tej pory absolutna pozycja mm utrzymywana po stronie hosta. *Jeśli* spike (Faza 0)
+potwierdzi ~G90~ abs w mm, alternatywą jest ~G90 G1 X0 Y0~ — ale to niepotwierdzona ścieżka
+„czystego Grbla" (sekcja 15). Budujemy na: homing + offset + dead-reckoning; ~G90 abs~ to
+opcjonalna optymalizacja po spike'u.
+
+* 3. Funkcje
+** 3.1 MVP
+- [ ] Auto-wykrycie i połączenie z iDraw (CH340, handshake, wersja, status ~?~).
+- [ ] Wczytanie SVG → polilinie w mm → narysowanie.
+- [ ] Pen up/down, ~$H~ home, ~$SLP~ disable.
+- [ ] Stop, wznów, abort + panic STOP (realtime ❓ lub fallback kooperatywny — sekcja 9).
+- [ ] Dokładne logowanie do pliku (poziomy info/debug/trace) + flagi CLI.
+- [ ] TUI na żywo: status, pozycja (z ~?~ ❓ lub z planu), progress, panel logów.
+- [ ] Mock plotera (praca/demo/testy bez sprzętu).
+
+** 3.2 Z listy użytkownika
+- [ ] Załaduj SVG i zacznij rysować.
+- [ ] Zatrzymaj rysowanie.
+- [ ] Zatrzymaj rysowanie *po zadanym czasie*.
+- [ ] Zatrzymaj rysowanie *i podnieś pióro* po zadanym czasie.
+- [ ] *Tryb interaktywny*: strzałki XY + dedykowane klawisze pen up/down (sekcja 8).
+- [ ] *Tryb pisania*: tekst, czcionka, rozmiar, bold; dostęp do czcionek systemowych;
+  wysokość w mm; rozwiązanie problemu „nie każda czcionka nadaje się do rysowania" (sekcja 7).
+- [ ] Parytet z „iDraw 2.0 Control" (3.4) + pomysły z „AxiDraw Control" (3.5).
+
+** 3.3 Logowanie i wznawianie (nowe — szczegóły w sekcjach 5 i 6)
+- [ ] Bardzo dokładne logi wszystkich operacji TUI i plotera, do pliku, do wklejenia do Claude.
+- [ ] Domyślny plik logu + flaga ~--log-file~ + ~--no-log~ (całkowite wyłączenie).
+- [ ] Poziomy: *info / debug / trace* (trace = pełna komunikacja z ploterem).
+- [ ] Zapis stanu druku → ubicie procesu → restart → *wznowienie* (z opcją powtórzenia kilku ostatnich operacji).
+
+** 3.4 Parytet z „iDraw 2.0 Control"
+- [ ] *Setup pióra*: wysokości Z up/down, toggle (~$TP~), kalibracja.
+- [ ] *Manual*: jog/walk, włącz/wyłącz silniki (~$SLP~), home (~$H~), wersja, nickname (~$QT~/~$ST=~).
+- [ ] *Opcje*: prędkość pen-down/up (feedrate), wysokości Z, accel/cornering/smoothness
+  (przez ~$$~ / firmware), reorder/optymalizacja ścieżek, model/rozmiar, return-to-home,
+  clip-to-page, kopie + ~page_delay~ między kopiami, warstwy (1–1000).
+- [ ] *Preview / estymacja czasu* (dry-run bez sprzętu).
+
+** 3.5 Pomysły pożyczone z „AxiDraw Control" (tylko inspiracja)
+- [ ] Optymalizacja kolejności ścieżek (mniej przejazdów pen-up; nearest-neighbour / 2-opt).
+- [ ] Hatch-fill wnętrz (inspiracja ~eggbot_hatch.py~) — pełne litery/kształty.
+- [ ] Frame / bounds — obrysuj prostokąt pracy (pen-up) przed rysowaniem.
+- [ ] Multi-pen po warstwach/kolorach (pauza na wymianę pisaka).
+- [ ] Auto-rotate / dopasowanie do strony.
+- [ ] Raport wersji/napięcia/statusu.
+
+** 3.6 Moje propozycje (dodatkowe)
+- [ ] *Podgląd toolpath w TUI* na canvasie braille'owym + *kursor pozycji pióra na żywo* (z ~?~).
+- [ ] *Set origin / work offset* (G54) — ustaw bieżącą pozycję jako (0,0).
+- [ ] *Profile maszyn* w TOML (rozmiar pola, Z, prędkości) — sekcja 10.
+- [ ] Przełącznik jednostek *mm/inch* w UI.
+- [ ] *Panic STOP* — zawsze aktywny klawisz: soft-reset + pen up.
+- [ ] *Kreator kalibracji pióra/Z*.
+- [ ] *Kolejka zadań* (wiele plików).
+- [ ] *Konsola surowego G-code* — wyślij dowolną komendę; świetne do debugowania na żywo.
+
+* 4. Architektura
+Kluczowe wyzwanie: I/O szeregowe *blokuje*, a ruchy trwają realny czas. TUI musi pozostać
+responsywne (render, reakcja na STOP) podczas rysowania → *osobny wątek robotniczy + kanały*.
+
+#+begin_example
+            ┌──────────────────────────────────────────────┐
+            │  UI thread (main)                            │
+            │  ratatui + crossterm                         │
+            │  - render: dirty + throttle (≤30 FPS)        │
+            │  - odczyt zdarzeń klawiatury                 │
+            │  - mapuje klawisze -> Command                │
+            └───────────────┬───────────────▲──────────────┘
+              Command (mpsc) │               │ Event (mpsc)
+                             ▼               │
+            ┌──────────────────────────────────────────────┐
+            │  Worker thread                               │
+            │  - posiada Transport (serial)                │
+            │  - wykonuje Plan op-po-op (sync send→`ok`)    │
+            │  - checkpoint progress.json z korektą bufora  │
+            │    (`ok`=przyjęto≠narysowano! patrz 6)        │
+            │  - między op: try_recv(Command) -> pauza/stop │
+            │  - [❓] poll `?` -> pozycja/progress -> Event  │
+            └───────────────┬──────────────────────────────┘
+                            │ Transport trait
+        ┌───────────────────┼───────────────────────┐
+        ▼                   ▼                        ▼
+  SerialTransport      MockTransport            TcpTransport
+  (serialport, CH340)  (symulacja + `?`)        (opcjonalnie, ser2net/zdalnie)
+#+end_example
+
+- *Command* (UI→Worker): ~Connect~, ~Disconnect~, ~LoadPlan~, ~Start~, ~Pause~, ~Resume~,
+  ~Stop{pen_up}~, ~StopAfter{dur, pen_up}~, ~Jog{dx,dy}~, ~JogZ~, ~PenUp~, ~PenDown~, ~Home~,
+  ~SetOrigin~, ~Frame~, ~RawGcode(String)~, ~EStop~.
+- *Event* (Worker→UI): ~Status~, ~Position{x,y,z}~, ~Progress{done,total,eta}~,
+  ~SegmentDone~, ~Connected{version}~, ~Error~, ~Log~ (też przez tracing).
+- *Warstwy modułów*:
+  - ~driver~ — wysokopoziomowe metody (pen_up/down, move_to, home, query_status, jog,
+    estop) na bazie ~Transport~; tu hook *TRACE* loguje każdą linię G-code.
+  - ~plan~ — SVG/tekst → polilinie mm → fit/pozycja → optymalizacja → ~Vec<Op>~ (G90 absolutne).
+  - ~job~ — katalog jobu, ~plan.jsonl~, ~progress.json~ (atomowo), logika wznawiania.
+  - ~config~ — profile/keybindy/ustawienia (TOML, ~serde~); ~cli~ — flagi (~clap~).
+  - ~logging~ — ~tracing~ + non-blocking file appender + panel w TUI + panic hook.
+
+#+begin_quote
+*Wątki, nie async.* ~serialport~ jest blokujący; model „dedykowany wątek + kanały"
+jest tu prostszy i wystarczający. Tokio nie jest potrzebne.
+#+end_quote
+
+#+begin_quote
+*Model strumieniowania (do decyzji w Fazie 0).* Wariant A: *send→`ok`* (wyślij op, czekaj
+na ~ok~, potem następny) — prosty, dokładne checkpointy, ale wolniejszy i UWAGA: w Grblu
+~ok~ = „przyjęto do bufora", nie „wykonano" (patrz 6). Wariant B: *character-counting*
+(utrzymuj bufor RX pełny) — szybszy, ale checkpoint musi odejmować głębokość bufora.
+*Render TUI: event-driven/dirty + throttle*, nie stałe 30 FPS bezczynnie (oszczędza CPU
+i log — patrz 5). Jeśli ~?~ nie działa (2.3), pozycja/progress liczone z planu (komenda
+wysłana), nie z ~MPos~.
+#+end_quote
+
+* 5. Logowanie (szczegóły)
+*Cel:* użytkownik kopiuje plik logu do konsoli Claude i z niego da się odtworzyć całą sesję
+i zdebugować błąd. Czyli logi muszą być: ze znacznikiem czasu (ms), z poziomem, z kontekstem
+(jaki job/segment), strukturalne i czytelne.
+
+** Stack
+- ~tracing~ (zdarzenia + spany) + ~tracing-subscriber~ (format + filtr poziomów) +
+  ~tracing-appender~ (*non-blocking* zapis do pliku — nie blokuje TUI/Workera; guard
+  flushuje przy wyjściu).
+- Spany kontekstu: ~job{id,file}~ → ~segment{i}~ → linie logów dziedziczą te pola.
+
+** Poziomy
+| Poziom | Co loguje |
+|--------+-----------|
+| *INFO* | operacje użytkownika i cykl życia jobu: connect, load file, plot start/end, pause, resume, pen up/down, home, stop, błędy krytyczne. |
+| *DEBUG* | decyzje wewnętrzne: parsing SVG (N ścieżek), optymalizacja (przejazd pen-up przed/po), planowane czasy, wybrany profil/ustawienia, fit do strony. |
+| *TRACE* | pełna komunikacja z ploterem: każda wysłana linia G-code (~->~) i każda odpowiedź (~<-~ z ~ok~/~error~/status), bajty realtime. |
+
+** Konfiguracja (CLI)
+- Domyślny plik: ~./plotly.log~ (append) — przewidywalna ścieżka, łatwa do wklejenia.
+- ~--log-file <PATH>~ — własny plik.
+- ~--log-level <off|info|debug|trace>~ (domyślnie ~info~); skróty ~-v~ (debug), ~-vv~ (trace).
+- ~--no-log~ — całkowicie wyłącz logowanie.
+- TUI zajmuje terminal → *logi idą do PLIKU*, nie na stdout. Dodatkowo *panel logów w TUI*
+  (ring buffer, live tail) + skrót „copy log path".
+- *Throttling statusu:* poll ~?~ z małą częstotliwością (~5–10 Hz), nie co klatkę; w TRACE
+  *rate-limituj/koalescuj* spam ~?~/~<...>~ — inaczej log rośnie o megabajty/min i przestaje
+  być „do wklejenia do Claude". Pełne logowanie ruchu — tak; pełne logowanie pollingu — nie.
+
+** Format linii (przykład, pasteable)
+#+begin_example
+2026-06-14T12:34:56.789+02:00  INFO plotly::job: plot started job_id=7 file="logo.svg" ops=1240 est="3:21"
+2026-06-14T12:34:56.812+02:00 DEBUG plotly::plan: optimized pen_up_before_mm=4210 after_mm=1180 ms=12
+2026-06-14T12:34:56.820+02:00 TRACE plotly::driver: -> "G1 G90 X120.500 Y80.000 F2000"
+2026-06-14T12:34:56.944+02:00 TRACE plotly::driver: <- "ok"
+2026-06-14T12:34:57.001+02:00 TRACE plotly::driver: -> "?"   <- "<Run|MPos:120.500,80.000,5.000|FS:2000,0>"
+#+end_example
+
+** Odporność na crash
+- *Panic hook*: zaloguj panikę (z backtrace), *przywróć terminal* (wyjście z alternate
+  screen, pokaż kursor) i flushnij log — żeby panika nie zostawiła zepsutego terminala i była
+  w logu. Rozważyć ~color-eyre~ do ładnych raportów.
+
+* 6. Zapis stanu i wznawianie (przemyślane)
+*Wymóg:* można ubić proces (nawet ~kill -9~ / zanik prądu) i po restarcie *wznowić druk*;
+opcjonalnie powtórzyć kilka ostatnich operacji.
+
+** Co zapisujemy — katalog jobu
+Katalog stanu z crate ~directories~. *UWAGA:* ~ProjectDirs::state_dir()~ istnieje *tylko na
+Linuksie* (~None~ na macOS/Windows!) — a pracujemy na macOS. Użyj ~data_dir()~/~data_local_dir()~
+jako bazy (np. ~…/Application Support/plotly/jobs/<job_id>/~ na macOS, ~~/.local/state/plotly/…~
+na Linuksie):
+- ~plan.jsonl~ — uporządkowana lista operacji, *w mm, współrzędne absolutne (G90)*, zapis
+  raz na starcie. Op = ~PenUp~ | ~PenDown~ | ~MoveTo{x,y,feed}~ | ~Dwell{s}~ | ~SetFeed{f}~.
+  To źródło prawdy (deterministyczne z SVG+ustawień, ale zapisujemy wprost, żeby uniknąć dryfu).
+- ~progress.json~ — ~{ job_id, committed_index, pos:[x,y,z], pen, settings_hash, source, started_at, updated_at }~.
+  ~pos~ = pozycja *komendowana* z planu (nie ~MPos~ — odczyt ~?~ jest ❓). Zapis *atomowy*
+  (temp + rename); znaczenie ~committed_index~ i korekta o bufor — patrz „Cykl zapisu".
+- ~meta.json~ — plik źródłowy + hash, profil maszyny, prędkości, transform/origin, timestamp.
+
+** Granularność
+Długie segmenty *dzielimy na krótkie op* (limit długości/czasu). Daje to częste, dokładne
+checkpointy, płynny progress i czysty stop/wznowienie.
+
+** Cykl zapisu i znaczenie ~committed_index~
+~committed_index~ = liczba op *uznanych za wykonane* = indeks *następnej* op do wysłania
+(0-based). *Pułapka:* w Grblu ~ok~ znaczy „przyjęto do bufora planera" (≈15 bloków),
+*nie* „narysowano". Dwa bezpieczne warianty:
+- *send→`ok` z pustym buforem* (wariant A, sekcja 4): wyślij op, czekaj ~ok~, i dopiero gdy
+  ruch *faktycznie się skończył* (krótkie op + ~time.sleep~ jak referencja, albo ~?~ → ~Idle~)
+  podnieś ~committed_index~. Prosto, ale wolniej.
+- *character-counting* (wariant B): trzymaj bufor pełny, ale ~committed_index~ ustawiaj na
+  ~(ostatni z ~ok~) − głębokość_bufora~ — inaczej po ~kill -9~ zgubisz do ~15 niedorysowanych
+  segmentów (dziura w rysunku).
+Zapis ~progress.json~ atomowo po każdej zmianie ~committed_index~ (opcja perf: batch ≈250 ms).
+
+** Wykrycie i propozycja wznowienia
+Przy starcie skanuj joby; jeśli ~committed_index < total~ → w TUI:
+~Resume job 7 (45%, logo.svg)? [Enter] resume  [n] new~.
+
+** Procedura wznawiania (mocna dzięki homingowi iDraw)
+1. Połącz + handshake.
+2. ~$H~ homing → pewny, absolutny układ odniesienia z krańcówek.
+   /(To przewaga iDraw nad AxiDraw — działa nawet po zaniku zasilania, o ile papier się nie ruszył.)/
+   *Uwaga:* po ~$H~ origin maszyny jest w *rogu sprzętowym*, a układ G-code bywa zamieniony/
+   odbity/przesunięty o pełny travel względem układu logicznego (2.3). Pozycję startu op
+   przelicz przez *ten sam transform „logiczny↔G-code"* — inaczej dojedziesz w złe miejsce.
+3. (opcjonalnie, ❓) ~?~ → potwierdź pozycję, jeśli ~?~ działa.
+4. Pen-up, dojedź do *przeliczonej* pozycji startu op ~committed_index~ (z ~progress~/planu).
+5. Pen-down i kontynuuj plan od ~committed_index~
+   (+ opcjonalny *overlap*: powtórz ostatnie K segmentów pen-down dla ciągłości tuszu).
+
+** Idempotencja i brak podwójnego rysowania
+- Op niewysłana (≥ ~committed_index~) zostanie po prostu wykonana — *pierwszy raz*, nie
+  „ponownie". Op w locie (wysłana bez ~ok~ lub w buforze) jest *poniżej* ~committed_index~
+  tylko jeśli liczymy bufor poprawnie (patrz „Cykl zapisu"); jeśli nie — patrz pułapka tam.
+- Jeśli plan trzymamy *absolutnie* (cel po spike'u), powtórzenie ~MoveTo~ do tego samego (x,y)
+  jest no-op → idempotentne. *Jeśli zostaniemy przy ~G91~ względnym (referencja, 2.3),
+  powtórzenie NIE jest idempotentne* — wznawiamy wtedy z przeliczonej pozycji absolutnej
+  (krok 4), a nie przez „powtórz ostatni ruch względny".
+- Crash w środku długiego pen-down i tak przerysuje od początku tej op — dlatego *dzielimy
+  na krótkie op* (granularność) i opcjonalny overlap; drobny overdraw jest akceptowalny.
+
+** Sygnały
+- *SIGINT / SIGTERM* → graceful: feed-hold (~!~), pen-up, opcjonalnie ~$SLP~, flush logu, zapis.
+- *SIGKILL / crash / zanik prądu* → nie do złapania → ratuje nas zapis-po-każdej-op + ~$H~
+  re-home przy starcie. Dlatego progress zapisujemy ciągle, nie tylko przy zamknięciu.
+
+** Flagi
+- ~--resume [job_id]~ — wznów (ostatni lub wskazany).
+- ~--resume-overlap <K>~ — powtórz K ostatnich segmentów pen-down (domyślnie 0).
+
+* 7. Tryb pisania i czcionki (odpowiedzi na pytania)
+*Czy mamy dostęp do czcionek systemowych?* — *TAK.* Crate ~font-kit~ używa natywnych
+API (Core Text na macOS, DirectWrite na Windows, fontconfig na Linux): enumeruje wszystkie
+zainstalowane czcionki i ładuje po rodzinie + wadze (bold) + stylu (italic).
+
+*Czy da się podać wysokość w mm?* — *TAK.* Metryki z ~ttf-parser~ / font-kit:
+~units_per_em~, ~ascender~, ~descender~, ~cap_height~, ~x_height~, bbox glifu. Wysokość fizyczna
+= ~metric / units_per_em × em_mm~. Użytkownik podaje rozmiar albo jako *cap-height = N mm*,
+albo w *pt* (~em_mm = pt × 25.4/72~). TUI pokazuje wynikową wysokość/szerokość w *mm na żywo*.
+
+*Nie każda czcionka nadaje się do rysowania — rozwiązanie:*
+Standardowe TTF/OTF to czcionki *konturowe* (opisują /brzeg/ wypełnionego kształtu). Pióro
+rysujące taki kontur daje litery „puste"/o podwójnej kresce. Dlatego:
+
+1. *PRIMARY — czcionki single-stroke (Hershey).* Bundlowane, public domain, zaprojektowane
+   jako *ścieżki pióra* (szkielet litery). Kilka krojów (sans/serif/script/gothic). „Bold" =
+   double-stroke/offset; „italic" = ścinanie (shear). Czysty efekt „pisania".
+2. *SECONDARY — dowolna czcionka systemowa w trybie outline.* Wyciągamy kontury glifów
+   (~ttf-parser~) i rysujemy je jako obrys (efekt szablonowy). Opcjonalnie *hatch-fill* wnętrza
+   (inspiracja ~eggbot_hatch.py~) → pełne litery.
+3. /(później)/ center-line tracing konturu ≈ single-stroke — trudne, known limitation.
+
+UI pozwala wybrać: *tryb* (Hershey [recommended] / system-outline / system-outline + hatch),
+*font*, *rozmiar* (mm/pt), *bold*, *italic*; podgląd + wymiary w mm.
+Wyjście = polilinie w mm → ten *sam pipeline rysowania* co SVG.
+
+* 8. Tryb interaktywny (jog) i klawiszologia
+Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro. Jog docelowo
+~$J=G91 X<step> F<feed>~ (❓ — w referencji nieużywane); fallback ~G91 G1 X<step> F<feed>~
+(pamiętaj o transformie osi z 2.3!). Trzymany klawisz → koalescuj/ogranicz tempo jogów;
+~0x85~ (jog-cancel) tylko jeśli realtime działa.
+
+| Klawisz | Akcja |
+|---------+-------|
+| ~← ↑ → ↓~ | jog XY o bieżący krok |
+| ~+~ / ~-~ | zmień krok jog (0.1 / 1 / 5 / 10 mm) |
+| ~Space~ | toggle pen (~$TP~) |
+| ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
+| ~h~ | home (~$H~) |
+| ~o~ | set origin (work offset) |
+| ~f~ | frame — obrysuj bounding box pracy (pen-up) |
+| ~g~ | go-to XY (wpisz współrzędne) |
+| ~Esc~ | pause (feed-hold ~!~ ❓; fallback: pauza kooperatywna) |
+| ~r~ / =~= | resume (=~= ❓; fallback: wznów wysyłanie segmentów) |
+| ~S~ | *STOP* (abort: soft-reset + pen up) — zawsze aktywny |
+| ~c~ | konsola surowego G-code |
+| ~q~ | quit (graceful) |
+
+Teksty w UI po angielsku; tabela tu jest tylko dokumentacją. Keymap *konfigurowalny w TOML*.
+*Wejście jest modalne:* skróty jednoklawiszowe (np. ~S~, ~Space~) działają w trybie nawigacji,
+ale w polach tekstowych (konsola ~c~ — np. ~M3 S100~; go-to ~g~; nickname) muszą być
+*wyłączone* — inaczej ~S~ z komendy ~M3 S100~ wywoła STOP. Dlatego *panic STOP ma osobny,
+niełapany-w-tekście skrót* (np. ~Ctrl-C~/~Ctrl-X~) działający we wszystkich trybach, niezależnie
+od ~S~.
+
+* 9. Stop / stop po czasie / stop + pen up po czasie
+*Dwie drogi* (wybór po spike'u, 2.3) — projektujemy obie, bo realtime jest ❓:
+
+*A. Realtime (jeśli DrawCore wspiera ~!~/=~=/~0x18~):*
+- *Stop now* → ~!~ (feed-hold): hamuje w ruchu, zachowuje pozycję → ~Paused~. Wznów = =~=.
+- *Stop + pen up* → ~!~, *poczekaj aż stanie*, *potem Z-up* (pen up) → ~Paused-pen-up~.
+  *Kolejność:* pen-up *przed* ewentualnym soft-resetem — po ~0x18~ Grbl wpada w ALARM
+  i *odrzuca ruchy* do ~$H~/~$X~, więc Z-up po resecie się NIE wykona.
+- *Panic STOP* → *najpierw* Z-up (jeśli zdąży), *potem* ~0x18~. /Świadomy kompromis:/ jeśli
+  ma być natychmiast i bezwarunkowo, ~0x18~ idzie pierwszy i *pióro zostaje na dole* — nie da
+  się mieć naraz „natychmiast zabij ruch" i „kontrolowane pen-up". Po panice: ~$H~ przed wznową.
+
+*B. Kooperatywny fallback (jak referencja — gdy brak realtime):*
+- Stop = *przestań wysyłać kolejne segmenty* i podnieś pióro przy najbliższej granicy op.
+  Worker sprawdza Command/deadline *między op* (try_recv, nieblokująco). „Natychmiastowość"
+  jest ograniczona długością op → trzymaj op krótkie (granularność, sekcja 6).
+- *Stop po czasie T* / *Stop + pen up po czasie T* → timer; po deadline ustaw flagę stop,
+  która zadziała przy najbliższej granicy op (+ Z-up).
+
+W obu drogach po zatrzymaniu: zapis stanu (sekcja 6). Panic STOP — osobny skrót z sekcji 8.
+
+* 10. Profile maszyn (iDraw)
+Pole robocze (komplet z ~idraw2_0_conf.py~, ~model~ 1–4 + warianty travel):
+
+| Model (~model~) | X × Y |
+|-----------------+-------|
+| iDraw V2/V3, SE/A4 (1) | *300 × 210 mm* |
+| iDraw V3/A3, SE/A3 (2) | *430 × 297 mm* |
+| iDraw V3 XLX (3) | 595 × 218 mm |
+| iDraw MiniKit (4) | 160 × 101.6 mm |
+| SE/A2 / SE/A1 / SE/A0 | 594×432 / 864×594 / 1189×841 mm |
+| V3/B6 | 190 × 140 mm |
+
+Domyślne (iDraw): pen-down ~Z=5~, pen-up ~Z=0.5~, feed pióra ~5000~; XY pen-down ~F2000~,
+pen-up ~F8000~; accel 75; smoothness 10; cornering 10; ~servo_timeout~ 60000 ms; ~page_delay~
+15 s; warstwy 1–1000; clip-to-page on.
+
+*Uwaga o jednostkach:* powyższe mm to *pole logiczne*. Jednostki *na drucie* nie muszą być mm
+(referencja: jednostki krokowe ze ~step_scale~ i ~/100~ — 2.3). Skalę/transform ustal w spike'u
+i trzymaj w profilu. Profile w *TOML*; gdzie się da, auto-odczyt z ~$$~ (steps/mm, rate, accel).
+Rozmiary AxiDraw — tylko jako referencja, gdyby kiedyś.
+
+* 11. Stack technologiczny
+| Warstwa | Crate | Dlaczego |
+|---------+-------+----------|
+| TUI | ~ratatui~ + ~crossterm~ | standard TUI w Rust; crossterm = cross-platform backend + zdarzenia. |
+| Serial | ~serialport~ | cross-platform, ~available_ports()~ z USB VID/PID (wykrycie CH340), ustawienie baud/RTS/DTR. |
+| Parsing SVG | ~usvg~ (resvg) | normalizuje SVG do absolutnych MoveTo/LineTo/QuadTo/CurveTo; rozwiązuje style/transformacje/~use~. |
+| Flatten krzywych | ~kurbo~ | spłaszczanie Bézierów z tolerancją → polilinie. (alt.: ~svg2polylines~.) |
+| Czcionki systemowe | ~font-kit~ | enumeracja + ładowanie czcionek systemowych (Core Text/DirectWrite/fontconfig). |
+| Metryki/glify | ~ttf-parser~ | ~units_per_em~, metryki, outline glifu (bezpieczny, zero-alloc). |
+| Single-stroke | Hershey (dane wbudowane) | czcionki pióra; własny mały parser danych Hershey. |
+| Logi | ~tracing~ + ~tracing-subscriber~ + ~tracing-appender~ | strukturalne logi, spany, non-blocking plik. |
+| CLI | ~clap~ (derive) | flagi ~--log-*~, ~--port~, ~--profile~, ~--resume~, ~--simulate~. |
+| Config | ~serde~ + ~toml~ | profile, keybindy, ustawienia. |
+| Ścieżki | ~directories~ | katalogi state/config per-OS. |
+| Błędy | ~anyhow~ / ~color-eyre~ | ergonomiczne błędy + ładne raporty + panic hook. |
+
+* 12. Struktura plików (cargo)
+#+begin_example
+plotly/
+├── Cargo.toml
+├── CLAUDE.md
+├── DESIGN.org
+├── src/
+│   ├── main.rs            # CLI, init logging, terminal guard, run app
+│   ├── cli.rs             # clap Args
+│   ├── logging.rs         # tracing: file appender, levels, in-TUI layer, panic hook
+│   ├── app.rs             # App state, tryby, pętla zdarzeń
+│   ├── input.rs           # keymap -> Command
+│   ├── ui/
+│   │   ├── mod.rs
+│   │   ├── canvas.rs      # braille toolpath + kursor pióra
+│   │   ├── panels.rs      # status, log panel, controls, file picker
+│   │   └── theme.rs
+│   ├── plotter/
+│   │   ├── mod.rs         # Worker: pętla, Command/Event
+│   │   ├── transport.rs   # trait Transport
+│   │   ├── serial.rs      # SerialTransport (serialport, CH340 handshake)
+│   │   ├── mock.rs        # MockTransport (symulacja + `?`)
+│   │   ├── tcp.rs         # (opcjonalnie) TcpTransport
+│   │   └── driver.rs      # DrawCore/G-code: move_to, pen, home, jog, status, estop
+│   ├── geometry.rs        # mm/inch, fit do pola, transformacje
+│   ├── plan/
+│   │   ├── mod.rs         # Op, Plan; subdivision; cap długości
+│   │   ├── svg.rs         # usvg + flatten (kurbo)
+│   │   ├── text.rs        # Hershey + system-outline (font-kit/ttf-parser)
+│   │   ├── optimize.rs    # reorder/join/dedupe
+│   │   └── estimate.rs    # czas + dystans (dry-run)
+│   ├── fonts/
+│   │   ├── hershey.rs     # wbudowane dane Hershey + metryki mm
+│   │   └── system.rs      # font-kit enumerate + ttf-parser outline + metryki mm
+│   ├── job.rs             # katalog jobu, plan.jsonl, progress.json (atom), resume
+│   ├── config.rs          # TOML: profile, keybindy
+│   └── profiles.rs        # wbudowane profile iDraw
+├── fonts/                 # dane Hershey (lub include_str! w binarce)
+├── tests/
+└── README.md
+#+end_example
+
+* 13. CLI (clap)
+#+begin_example
+plotly [OPTIONS] [SVG_FILE]
+
+  --port <PATH>            # wymuś port; domyślnie auto (CH340 1A86:7523/8040)
+  --baud <N>               # domyślnie 115200 (firmware i tak fixed — rzadko potrzebne)
+  --profile <NAME>         # profil maszyny (idraw-a4, idraw-a3, ...)
+  --simulate               # użyj MockTransport (bez sprzętu)
+  --log-file <PATH>        # domyślnie ./plotly.log
+  --log-level <LEVEL>      # off|info|debug|trace (domyślnie info)
+  -v / -vv                 # debug / trace
+  --no-log                 # wyłącz logowanie
+  --resume [JOB_ID]        # wznów przerwany druk
+  --resume-overlap <K>     # powtórz K ostatnich segmentów pen-down
+#+end_example
+
+* 14. Plan pracy (drobne, manualnie testowalne kroki)
+Każdy krok jest *małym, samodzielnym przyrostem*: kończy się stanem, który *ręcznie
+sprawdzisz* (~/Test:/~), a gdzie logika jest czysta — testem automatycznym (~/Auto:/~,
+~cargo test~). Kroki sprzętowe (✱) wymagają podłączonego iDraw; resztę robisz na
+~--simulate~ (~MockTransport~). Skróty: *U* = unit (~#[cfg(test)]~ w module), *I* =
+integration (~tests/~, na ~MockTransport~/~TcpTransport~).
+
+*Rytm pracy nad każdym krokiem (kontrakt „done"):* po napisaniu kodu kroku *nie commituję
+od razu*. Zamiast tego:
+1. *Wypisuję komendy testów do odpalenia przez Ciebie* — komplet do skopiowania: ~cargo fmt
+   --check~, ~cargo clippy~, ~cargo test~ (oraz konkretny ~cargo test <nazwa>~ dla testów
+   /Auto:/ tego kroku) i ~cargo run -- …~ z właściwymi flagami.
+2. *Dla kroków sprzętowych (✱)* — dodatkowo krótka *instrukcja jak sprawdzić funkcję na
+   maszynie*: co podłączyć, co wcisnąć i co ma się fizycznie stać (wg /Test:/ danego kroku).
+3. *Pytam, czy kontynuować* — czekam, aż potwierdzisz, że testy przeszły i funkcja działa.
+4. *Dopiero po Twoim „tak"* — robię *commit* tego kroku (komunikat po angielsku; jeden krok =
+   jeden commit) i zaznaczam ~[X]~ w planie. Bez potwierdzenia nie commituję i nie ruszam dalej.
+
+** Faza 0 — szkielet, logowanie, mock, spike protokołu
+- [ ] *0.1 ~cargo init~ + CI lokalne.* Pusty bin, ~cargo build~/~clippy~/~fmt~ przechodzą;
+  ~rust-toolchain~ i ~.gitignore~. /Test:/ ~cargo run -- --help~ nic nie wypisuje (jeszcze).
+  /Auto:/ U: trywialny ~smoke~ test (~assert!(true)~) — pin na to, że ~cargo test~ działa.
+- [ ] *0.2 CLI (~clap~ derive).* ~cli.rs~: ~--port~, ~--baud~, ~--profile~, ~--simulate~,
+  ~--log-file~, ~--log-level~, ~-v/-vv~, ~--no-log~, ~--resume~, ~--resume-overlap~, ~[SVG_FILE]~ (sekcja 13).
+  /Test:/ ~--help~ pokazuje wszystkie flagi; ~-vv~ → poziom ~trace~ w strukturze ~Args~.
+  /Auto:/ U: parsowanie ~Args~ — ~-v~→debug, ~-vv~→trace, ~--no-log~ wygrywa z ~--log-level~.
+- [ ] *0.3 Logowanie (~tracing~) + panic hook.* ~logging.rs~: non-blocking file appender
+  (~tracing-appender~, guard), poziomy z 0.2, format z sekcji 5. Panic hook: log paniki +
+  przywróć terminal + flush. /Test:/ ~cargo run -- -vv~ tworzy ~./plotly.log~ z linią ~INFO~;
+  ~--no-log~ → brak pliku; sztuczna ~panic!()~ zostawia czytelny terminal i wpis w logu.
+  /Auto:/ U: filtr poziomów (mapowanie flag→~LevelFilter~). I: log do ~tempfile~, asercja na
+  format linii (timestamp ms, poziom, target).
+- [ ] *0.4 Terminal guard (alternate screen).* ~main.rs~: wejście/wyjście z alt-screen +
+  raw mode jako RAII guard; Ctrl-C i normalny ~q~ przywracają terminal. /Test:/ uruchom, wciśnij
+  ~q~ — prompt czysty; ubij ~kill -INT~ — terminal też czysty (Drop zadziałał).
+- [ ] *0.5 Pusty layout TUI (~ratatui~).* ~app.rs~+~ui/~: ramki status/canvas/log, render
+  dirty+throttle (sekcja 4). Panel logów = live tail ring-buffera z *custom ~tracing~ layer*
+  (sekcja 5/12), równolegle do appendera plikowego z 0.3. Brak logiki plotera. /Test:/ widać
+  3 panele, panel logów pokazuje wpisy ~tracing~, ~q~ wychodzi, resize działa, idle nie zżera CPU.
+- [ ] *0.6 ~Transport~ trait + ~MockTransport~.* ~plotter/transport.rs~ (~send_line~,
+  ~read_line~, ~write_realtime~) + ~mock.rs~: kolejkuje ~ok~, symuluje ~v~→~"DrawCore V2.10"~,
+  loguje ~->~/~<-~ (TRACE). /Test:/ mały harness w ~--simulate~ wysyła ~v~ i loguje odpowiedź.
+  /Auto:/ I: ~MockTransport~ na ~v~ zwraca wersję; na ~G1...~ zwraca ~ok~; TRACE zawiera obie linie.
+- [ ] *0.7 ✱ HARDWARE SPIKE (krytyczny, osobny binarny/przykład ~examples/spike.rs~).* Na
+  realnym iDraw sprawdź ❓ z sekcji 2/15: czy działają ~?~/~!~/=~=/~0x18~/~0x85~/~$J=~; format
+  ~<...|MPos:...>~; czy firmware przyjmuje ~G21~+~G90~ abs w mm i sam planuje; zmierz transform
+  osi i skalę, kierunek homingu, offset origin (2.4), zachowanie po ~0x18~. *Zapisz wyniki do
+  ~DESIGN.org~ sekcja 15 (✔/❓ → fakty).* /Test:/ surowe linie w logu TRACE + notatka decyzji
+  „czysty Grbl vs referencja". *Ten krok zamyka kształt Faz 2/3 i sekcji 4/8/9.*
+
+** Faza 1 — połączenie i sterowanie ręczne (sprzęt)
+- [ ] *1.1 Wykrycie portu CH340.* ~serial.rs~: ~available_ports()~, filtr VID:PID
+  ~1A86:7523/8040~; ~--port~ wymusza. /Test:/ ~--simulate~ → „mock"; bez sprzętu i bez ~--port~
+  → czytelny błąd „no iDraw found". /Auto:/ U: funkcja filtrująca listę portów po VID/PID
+  (na ustawionej liście atrap ~SerialPortInfo~).
+- [ ] *1.2 ✱ Otwarcie + handshake.* RTS/DTR=false, baud 115200; sekwencja ~$B\r~→2 linie→
+  ~reset_input_buffer~→~v\r~; parsuj ~"DrawCore V…"~ → ~Event::Connected{version}~ (2.1).
+  /Test:/ ✱ realny iDraw: status „Connected DrawCore V2.xx" w TUI, pełen handshake w TRACE.
+  /Auto:/ I: ~MockTransport~ przechodzi handshake i zwraca wersję; zły prefiks → błąd połączenia.
+- [ ] *1.3 ✱ Pen up/down + toggle.* ~driver.rs~: ~pen_up~/~pen_down~ (~G1 G90 Z..F..~ +
+  doprecyzowujące ~G1 F<feed_xy>~ — uwaga z 2.2!), ~$TP~ toggle; klawisze ~[~/~]~/~Space~.
+  /Test:/ ✱ pióro fizycznie idzie w dół/górę; ~$QP~ potwierdza stan. /Auto:/ I: ~pen_down~
+  emituje *dokładnie* dwie linie w właściwej kolejności (Z, potem feed) — asercja na bufor mocka.
+- [ ] *1.4 ✱ Homing ~$H~ + ~$SLP~.* Klawisz ~h~ → ~$H~; disable silników. /Test:/ ✱ karetka
+  bazuje na krańcówkach; po ~$SLP~ silniki luźne. /Auto:/ I: ~h~ wysyła ~$H\r~.
+- [ ] *1.5 Konsola surowego G-code (~c~).* Modalne pole tekstowe (input wyłącza skróty
+  jednoklawiszowe — sekcja 8!); wyślij dowolną linię, pokaż odpowiedź. /Test:/ wpisz ~M3 S100~
+  — ~S~ NIE wywołuje STOP; w mocku widać ~->~/~<-~. /Auto:/ U: router wejścia — w trybie tekst
+  ~S~ trafia do bufora, w trybie nawigacji ~S~ = ~Command::EStop~.
+- [ ] *1.6 ✱ Jog strzałkami + zmiana kroku.* ~Jog{dx,dy}~ przez ~G91 G1~ *z transformem osi
+  z 2.3* (fallback; ~$J=~ tylko jeśli spike ✔); ~+~/~-~ zmienia krok 0.1/1/5/10 mm; koalescencja
+  przy trzymaniu. /Test:/ ✱ strzałka w prawo → karetka jedzie w +X *logicznym* (nie odbitym!);
+  krok się zmienia. /Auto:/ U: transform „logiczny dx,dy → G-code X,Y" (zamiana+znaki, 2.3) —
+  tablica przypadków; I: ~Jog~ emituje przeliczoną linię ~G91 G1~.
+
+** Faza 2 — SVG → Plan → rysowanie + stop
+- [ ] *2.1 Parsing SVG → polilinie mm.* ~plan/svg.rs~: ~usvg~ + flatten ~kurbo~ z tolerancją;
+  rozdzielczość style/transform/~use~. /Test:/ ~--simulate logo.svg~ + ~--log-level debug~ →
+  „N ścieżek, M punktów". /Auto:/ U: znany SVG (kwadrat 10×10 mm) → 4 wierzchołki w mm; łuk →
+  polilinia w tolerancji. I: plik testowy w ~tests/fixtures/~.
+- [ ] *2.2 Geometria: fit/pozycja + transform logiczny↔G-code.* ~geometry.rs~: mm/inch,
+  fit do pola profilu, origin; *centralny transform z 2.3/2.4* (zamiana X↔Y, znaki, skala).
+  /Test:/ DEBUG pokazuje bbox po fit. /Auto:/ U: round-trip ~logical→wire→logical~ = identyczność;
+  punkt poza polem wykrywany; znany punkt mapuje się na oczekiwane wire-XY (oracle ze spike'u).
+- [ ] *2.3 Budowa ~Plan~ (~Vec<Op>~) + subdivision.* ~plan/mod.rs~: ~PenUp/PenDown/MoveTo/
+  Dwell/SetFeed~; dziel długie segmenty na krótkie op (cap długości/czasu — sekcja 6). /Test:/
+  DEBUG: liczba op, max długość segmentu ≤ cap. /Auto:/ U: segment 100 mm przy cap 5 mm → ≥20 op;
+  granice op zachowują geometrię (suma = oryginał).
+- [ ] *2.4 Worker: pętla send→~ok~ na mocku.* ~plotter/mod.rs~: wątek + kanały Command/Event;
+  wykonuje ~Plan~ op-po-op, między op ~try_recv~. /Test:/ ~--simulate~ rysuje cały plan, TUI
+  pokazuje „done". /Auto:/ I: worker na ~MockTransport~ wysyła N op w kolejności, emituje
+  ~SegmentDone~×N i ~Progress~ rosnący; każda ~MoveTo~ = poprawna linia G-code.
+- [ ] *2.5 Podgląd braille + pozycja.* ~ui/canvas.rs~: toolpath na canvasie braille'owym +
+  kursor pozycji (z planu; ~?~ tylko jeśli spike ✔). /Test:/ ~--simulate~: rysunek zgadza się
+  z SVG, kursor wędruje. /Auto:/ U: mapowanie mm→komórki braille (skala/clamp do canvasu).
+- [ ] *2.6 ✱ Pierwszy realny wydruk.* Pełny pipeline na sprzęcie. /Test:/ ✱ kwadrat/logo
+  wychodzi *we właściwej orientacji i skali* (weryfikacja transformu 2.2!). Linijką: wymiar mm.
+- [ ] *2.7 Stop / pauza / wznów + panic STOP.* Wariant wg spike'u (realtime ~!~/=~= lub
+  kooperatywny — sekcja 9); ~Esc~ pauza, ~r~ wznów, ~S~ STOP (pen-up). *Panic STOP = osobny,
+  zawsze aktywny skrót* niełapany w polach tekstowych (~Ctrl-C~/~Ctrl-X~, sekcja 8) → pen-up +
+  abort; zastępuje „graceful quit na Ctrl-C" z 0.4, gdy plotter działa. /Test:/ ✱ ~S~ podnosi
+  pióro i staje; ~Esc~/~r~ wstrzymuje/wznawia; panic STOP działa też z otwartej konsoli ~c~
+  (gdzie ~S~ jest tekstem). /Auto:/ I: na mocku Command ~Stop~ między op zatrzymuje wysyłkę
+  i emituje pen-up; ~Pause~/~Resume~ zachowuje ~committed_index~; ~EStop~ z trybu tekstowego wyzwala abort.
+- [ ] *2.8 Stop po czasie / stop+pen-up po czasie.* ~StopAfter{dur, pen_up}~: timer →
+  flaga → zadziała na granicy op. /Test:/ ~--simulate~: zadanie staje po ~T~ s (±długość op);
+  z pen-up pióro w górze. /Auto:/ U: logika deadline (czy granica op po ~T~ wyzwala stop);
+  I: na mocku z przyspieszonym „czasem".
+
+** Faza 3 — trwałość i wznawianie
+- [ ] *3.1 Katalog jobu + zapis ~plan.jsonl~.* ~job.rs~ + ~directories~ (~data_dir~ na macOS —
+  uwaga z sekcji 6!). /Test:/ start jobu tworzy katalog z ~plan.jsonl~ i ~meta.json~. /Auto:/
+  U: ścieżka bazowa per-OS (mock ~ProjectDirs~); I: round-trip ~Plan~ → jsonl → ~Plan~ równe.
+- [ ] *3.2 ~progress.json~ atomowo + ~committed_index~.* Zapis temp+rename po każdej zmianie
+  indeksu; znaczenie indeksu + korekta o bufor wg wariantu ze spike'u (sekcja 6). /Test:/
+  ~--simulate~: ~progress.json~ rośnie w trakcie. /Auto:/ U: ~committed_index~ liczone poprawnie
+  dla wariantu A i B (głębokość bufora); I: zapis jest atomowy (brak częściowego pliku po przerwaniu).
+- [ ] *3.3 Wykrycie i propozycja wznowienia.* Skan jobów przy starcie; jeśli ~committed_index
+  < total~ → prompt ~Resume job N (XX%)?~. /Test:/ ubij ~--simulate~ w połowie (~kill~),
+  restart → pojawia się prompt. /Auto:/ I: katalog z częściowym progresem → ~Resume~ proponowane;
+  kompletny → nie.
+- [ ] *3.4 ✱ Procedura wznawiania (~$H~ + transform).* ~$H~ → przelicz pozycję op
+  ~committed_index~ tym samym transformem (2.4) → pen-up dojazd → pen-down → kontynuuj; opcja
+  ~--resume-overlap K~. /Test:/ ✱ przerwij realny wydruk, wznów — rysunek *kontynuuje w tym
+  samym miejscu* (bez przesunięcia/podwójnego rysowania). /Auto:/ U: idempotencja przy planie
+  absolutnym (powtórzony ~MoveTo~ = no-op); I: resume od indeksu k wysyła op k..N raz.
+- [ ] *3.5 Obsługa sygnałów.* SIGINT/SIGTERM → graceful (pen-up, ~$SLP~, flush, zapis);
+  SIGKILL ratuje zapis-po-op + re-home. /Test:/ ~kill -INT~ podczas ~--simulate~ → pióro w górę,
+  log sflushowany, ~progress.json~ spójny. /Auto:/ I: handler ustawia stop i zapisuje stan.
+
+** Faza 4 — tryb pisania
+- [ ] *4.1 Hershey single-stroke → polilinie mm.* ~fonts/hershey.rs~: wbudowane dane +
+  parser; metryki mm (sekcja 7). ~plan/text.rs~ składa glify w polilinie mm (ten sam pipeline
+  rysowania co SVG). /Test:/ ~--simulate~ napis „Hi" rysuje się jako ścieżki pióra.
+  /Auto:/ U: glif → niepuste polilinie; wysokość cap = zadane mm (skala metryk).
+- [ ] *4.2 Wysokość w mm / pt + podgląd.* UI: rozmiar (cap-height mm lub pt), live wymiary mm
+  (sekcja 7). /Test:/ zmiana rozmiaru zmienia wymiary w UI i na canvasie. /Auto:/ U: ~pt→em_mm~
+  i ~metric/units_per_em×em_mm~ na znanych wartościach.
+- [ ] *4.3 Czcionki systemowe (outline).* ~fonts/system.rs~: ~font-kit~ enumerate + ~ttf-parser~
+  outline → obrys; bold/italic. /Test:/ wybór rodziny z systemu rysuje obrys liter. /Auto:/ U:
+  enumeracja zwraca niepustą listę; outline znanej czcionki → zamknięte kontury.
+
+** Faza 5 — wykończenie
+- [ ] *5.1 Profile maszyn (TOML) + ~--profile~.* ~profiles.rs~/~config.rs~: pola z sekcji 10,
+  auto-odczyt z ~$$~ gdzie się da. /Test:/ ~--profile idraw-a3~ zmienia pole/limity. /Auto:/ U:
+  deserializacja TOML; wbudowane profile mają poprawne wymiary.
+- [ ] *5.2 Optymalizacja ścieżek (reorder/join/dedupe).* ~plan/optimize.rs~ (nearest-neighbour/
+  2-opt). /Test:/ DEBUG: pen-up travel przed/po. /Auto:/ U: po optymalizacji travel pen-up ≤
+  przed; zbiór segmentów pen-down niezmieniony (tylko kolejność).
+- [ ] *5.3 Frame + estymacja czasu.* ~f~ obrysowuje bbox (pen-up); ~plan/estimate.rs~ dry-run
+  czas+dystans. /Test:/ ✱ frame obrysowuje pole; estymata ~est=~ w UI. /Auto:/ U: estymata ≈ suma
+  czasów segmentów (model prędkości/accel z profilu).
+- [ ] *5.4 Reszta parytetu i UX (3.4/3.5/3.6).* Kopie/warstwy, ~page_delay~, hatch-fill;
+  *set origin* (~o~, work offset/G54), *go-to XY* (~g~), ~JogZ~ / kreator kalibracji pióra-Z,
+  przełącznik mm/inch, kolejka zadań. Domyka komendy z sekcji 4 i keybindy z sekcji 8, które
+  nie mają własnego kroku. /Test:/ per-funkcja na ~--simulate~ + ✱ wybrane na sprzęcie.
+  /Auto:/ U: hatch-fill prostokąta → linie w zadanym odstępie, w obrębie kształtu.
+
+* 15. Otwarte decyzje / do weryfikacji na sprzęcie
+- *Czy w ogóle „czysty Grbl":* czy firmware przyjmuje ~G21~ + ~G90~ absolutne w mm i sam liczy
+  CoreXY + przyspieszenia — czy musimy iść ścieżką referencji (~G91~ + transform + planer na hoście, 2.3).
+- *Transform „logiczny↔G-code":* zamiana X↔Y, znaki, skala (~step_scale~/~/100~), origin po ~$H~.
+- *Granice pola:* czy firmware ma jakiekolwiek soft-limity, czy bounds to *wyłącznie host*
+  (clip planu + clamp/odmowa jogu, 2.4); zachowanie krańcówek poza ~$H~ (ALARM czy zgrzyt?).
+- *Origin / 0,0:* offset modelu po ~$H~ (referencja: ~+y_max~), kierunek homingu, czy ~G90 G1 X0 Y0~
+  w ogóle działa (czy zostajemy przy ~$H~ + offset + dead-reckoning, 2.4).
+- Dokładny zestaw i zachowanie komend realtime (~!~, =~=, ~?~, ~0x18~, ~0x85~, ~$J=~) — *czy istnieją*.
+- Zachowanie po soft-reset (czy wymaga ~$H~/~$X~); kierunek homingu, znak ~MPos~, work offset (G54).
+- *Semantyka ~ok~* (przyjęto vs wykonano) i *głębokość bufora planera* — do poprawnego ~committed_index~ (6).
+- Semantyka i jednostki osi Z (down ~Z=5~ > up ~Z=0.5~) oraz argumentów ~$TP~.
+- Czy ~$$~ zwraca steps/mm / accel (do profili, skali i estymacji).
+- Streaming: send→~ok~ (prostsze + dokładne checkpointy) vs character-counting (perf) — 4 i 6.
+- Kodowanie odpowiedzi, timeouty, retry, obsługa ~error:<n>~ / ~ALARM~; detekcja utraty USB w trakcie.
