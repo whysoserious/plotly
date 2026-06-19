@@ -5,7 +5,7 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -65,7 +65,7 @@ pub fn install_panic_restore() {
 /// which would otherwise terminate the process without running [`Drop`].
 ///
 /// Keyboard Ctrl-C is delivered as a key event in raw mode (handled by
-/// [`run_until_quit`]), so this only fires for external signals.
+/// [`is_quit_key`]), so this only fires for external signals.
 pub fn install_signal_restore() {
     let result = ctrlc::set_handler(|| {
         restore();
@@ -77,23 +77,12 @@ pub fn install_signal_restore() {
     }
 }
 
-/// Block-read terminal events until the user quits with `q` or Ctrl-C.
-///
-/// Placeholder loop for step 0.4: there is no rendering yet (that arrives in
-/// 0.5), so we simply wait for the quit key and let the guard restore on return.
-pub fn run_until_quit() -> io::Result<()> {
-    loop {
-        if let Event::Key(key) = read()? {
-            // On Windows a key press also emits a Release event; ignore non-press.
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if key.code == KeyCode::Char('q') || ctrl_c {
-                tracing::info!("quit requested");
-                return Ok(());
-            }
-        }
+/// True if `key` is a quit request (`q` or Ctrl-C), ignoring key-release events
+/// (Windows emits a Release alongside each Press).
+pub fn is_quit_key(key: &KeyEvent) -> bool {
+    if key.kind != KeyEventKind::Press {
+        return false;
     }
+    key.code == KeyCode::Char('q')
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
