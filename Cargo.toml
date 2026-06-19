@@ -6,3 +6,4 @@ description = "TUI in Rust to drive an iDraw 2.0 pen plotter (DrawCore firmware)
 license = "MIT"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }

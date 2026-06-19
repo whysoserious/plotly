@@ -571,7 +571,7 @@ od razu*. Zamiast tego:
 - [X] *0.1 ~cargo init~ + CI lokalne.* Pusty bin, ~cargo build~/~clippy~/~fmt~ przechodzą;
   ~rust-toolchain~ i ~.gitignore~. /Test:/ ~cargo run -- --help~ nic nie wypisuje (jeszcze).
   /Auto:/ U: trywialny ~smoke~ test (~assert!(true)~) — pin na to, że ~cargo test~ działa.
-- [ ] *0.2 CLI (~clap~ derive).* ~cli.rs~: ~--port~, ~--baud~, ~--profile~, ~--simulate~,
+- [X] *0.2 CLI (~clap~ derive).* ~cli.rs~: ~--port~, ~--baud~, ~--profile~, ~--simulate~,
   ~--log-file~, ~--log-level~, ~-v/-vv~, ~--no-log~, ~--resume~, ~--resume-overlap~, ~[SVG_FILE]~ (sekcja 13).
   /Test:/ ~--help~ pokazuje wszystkie flagi; ~-vv~ → poziom ~trace~ w strukturze ~Args~.
   /Auto:/ U: parsowanie ~Args~ — ~-v~→debug, ~-vv~→trace, ~--no-log~ wygrywa z ~--log-level~.
