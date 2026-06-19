@@ -51,6 +51,10 @@ pub struct Args {
     /// Repeat the last K pen-down segments when resuming (for ink continuity).
     #[arg(long, value_name = "K", default_value_t = 0)]
     pub resume_overlap: u32,
+
+    /// Trigger a synthetic panic right after logging init (verifies the panic hook).
+    #[arg(long, hide = true)]
+    pub panic_test: bool,
 }
 
 /// Effective logging verbosity. `Off` disables logging entirely.
@@ -166,5 +170,11 @@ mod tests {
             parse(&["logo.svg"]).svg_file,
             Some(PathBuf::from("logo.svg"))
         );
+    }
+
+    #[test]
+    fn panic_test_flag_defaults_off_and_parses() {
+        assert!(!parse(&[]).panic_test);
+        assert!(parse(&["--panic-test"]).panic_test);
     }
 }

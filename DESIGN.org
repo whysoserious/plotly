@@ -575,7 +575,7 @@ od razu*. Zamiast tego:
   ~--log-file~, ~--log-level~, ~-v/-vv~, ~--no-log~, ~--resume~, ~--resume-overlap~, ~[SVG_FILE]~ (sekcja 13).
   /Test:/ ~--help~ pokazuje wszystkie flagi; ~-vv~ → poziom ~trace~ w strukturze ~Args~.
   /Auto:/ U: parsowanie ~Args~ — ~-v~→debug, ~-vv~→trace, ~--no-log~ wygrywa z ~--log-level~.
-- [ ] *0.3 Logowanie (~tracing~) + panic hook.* ~logging.rs~: non-blocking file appender
+- [X] *0.3 Logowanie (~tracing~) + panic hook.* ~logging.rs~: non-blocking file appender
   (~tracing-appender~, guard), poziomy z 0.2, format z sekcji 5. Panic hook: log paniki +
   przywróć terminal + flush. /Test:/ ~cargo run -- -vv~ tworzy ~./plotly.log~ z linią ~INFO~;
   ~--no-log~ → brak pliku; sztuczna ~panic!()~ zostawia czytelny terminal i wpis w logu.

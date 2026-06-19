@@ -1,14 +1,19 @@
 // Plotly — TUI in Rust for the iDraw 2.0 pen plotter.
-// CLI parsing lands here; logging (0.3), TUI (0.5) and the worker arrive later.
+// Wires CLI -> logging; TUI (0.5) and the worker arrive later.
 
 mod cli;
+mod logging;
 
 use clap::Parser;
 
 fn main() {
     let args = cli::Args::parse();
-    // Resolve verbosity now; logging init (0.3) will consume it, transport/resume later.
-    let _level = args.resolved_log_level();
+    // Keep the appender guard alive for the whole run so logs flush on exit.
+    let _log_guard = logging::init(&args);
+
+    if args.panic_test {
+        panic!("synthetic panic to exercise the logging panic hook");
+    }
 }
 
 #[cfg(test)]
