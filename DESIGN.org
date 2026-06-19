@@ -581,7 +581,7 @@ od razu*. Zamiast tego:
   ~--no-log~ → brak pliku; sztuczna ~panic!()~ zostawia czytelny terminal i wpis w logu.
   /Auto:/ U: filtr poziomów (mapowanie flag→~LevelFilter~). I: log do ~tempfile~, asercja na
   format linii (timestamp ms, poziom, target).
-- [ ] *0.4 Terminal guard (alternate screen).* ~main.rs~: wejście/wyjście z alt-screen +
+- [X] *0.4 Terminal guard (alternate screen).* ~main.rs~: wejście/wyjście z alt-screen +
   raw mode jako RAII guard; Ctrl-C i normalny ~q~ przywracają terminal. /Test:/ uruchom, wciśnij
   ~q~ — prompt czysty; ubij ~kill -INT~ — terminal też czysty (Drop zadziałał).
 - [ ] *0.5 Pusty layout TUI (~ratatui~).* ~app.rs~+~ui/~: ramki status/canvas/log, render
