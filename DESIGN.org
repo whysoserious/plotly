@@ -568,7 +568,7 @@ od razu*. Zamiast tego:
    jeden commit) i zaznaczam ~[X]~ w planie. Bez potwierdzenia nie commituję i nie ruszam dalej.
 
 ** Faza 0 — szkielet, logowanie, mock, spike protokołu
-- [ ] *0.1 ~cargo init~ + CI lokalne.* Pusty bin, ~cargo build~/~clippy~/~fmt~ przechodzą;
+- [X] *0.1 ~cargo init~ + CI lokalne.* Pusty bin, ~cargo build~/~clippy~/~fmt~ przechodzą;
   ~rust-toolchain~ i ~.gitignore~. /Test:/ ~cargo run -- --help~ nic nie wypisuje (jeszcze).
   /Auto:/ U: trywialny ~smoke~ test (~assert!(true)~) — pin na to, że ~cargo test~ działa.
 - [ ] *0.2 CLI (~clap~ derive).* ~cli.rs~: ~--port~, ~--baud~, ~--profile~, ~--simulate~,

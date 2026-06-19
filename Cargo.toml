@@ -1,0 +1,8 @@
+[package]
+name = "plotly"
+version = "0.1.0"
+edition = "2021"
+description = "TUI in Rust to drive an iDraw 2.0 pen plotter (DrawCore firmware)"
+license = "MIT"
+
+[dependencies]
