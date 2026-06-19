@@ -588,7 +588,7 @@ od razu*. Zamiast tego:
   dirty+throttle (sekcja 4). Panel logów = live tail ring-buffera z *custom ~tracing~ layer*
   (sekcja 5/12), równolegle do appendera plikowego z 0.3. Brak logiki plotera. /Test:/ widać
   3 panele, panel logów pokazuje wpisy ~tracing~, ~q~ wychodzi, resize działa, idle nie zżera CPU.
-- [ ] *0.6 ~Transport~ trait + ~MockTransport~.* ~plotter/transport.rs~ (~send_line~,
+- [X] *0.6 ~Transport~ trait + ~MockTransport~.* ~plotter/transport.rs~ (~send_line~,
   ~read_line~, ~write_realtime~) + ~mock.rs~: kolejkuje ~ok~, symuluje ~v~→~"DrawCore V2.10"~,
   loguje ~->~/~<-~ (TRACE). /Test:/ mały harness w ~--simulate~ wysyła ~v~ i loguje odpowiedź.
   /Auto:/ I: ~MockTransport~ na ~v~ zwraca wersję; na ~G1...~ zwraca ~ok~; TRACE zawiera obie linie.
