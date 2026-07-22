@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use tracing::level_filters::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::fmt::time::ChronoLocal;
-use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::{ChronoLocal, FormatTime};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -130,8 +131,56 @@ where
     tracing_subscriber::fmt::layer()
         .with_writer(writer)
         .with_ansi(false)
-        .with_timer(ChronoLocal::new(TIME_FORMAT.to_owned()))
-        .with_target(true)
+        .event_format(PlotlyFormat::default())
+}
+
+/// Line format of DESIGN.org §5: `<timestamp> LEVEL target: message field=value`.
+///
+/// Written by hand rather than configured on the built-in formatter because of
+/// one detail: the crate prefix is stripped from every target. Each line is
+/// already inside plotly's own log, so `plotly::` on all of them is noise that
+/// costs eight columns in the TUI panel.
+struct PlotlyFormat {
+    timer: ChronoLocal,
+}
+
+impl Default for PlotlyFormat {
+    fn default() -> Self {
+        Self {
+            timer: ChronoLocal::new(TIME_FORMAT.to_owned()),
+        }
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for PlotlyFormat
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        self.timer.format_time(&mut writer)?;
+        let meta = event.metadata();
+        write!(
+            writer,
+            " {:>5} {}: ",
+            meta.level(),
+            short_target(meta.target())
+        )?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+/// Drop the crate prefix: `plotly::plotter::handshake` -> `plotter::handshake`.
+fn short_target(target: &str) -> &str {
+    target
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap_or(target)
 }
 
 /// Build a single-layer subscriber over `writer` (used by tests).
@@ -285,9 +334,10 @@ mod tests {
         assert_eq!(lines.len(), 1, "expected one captured line: {lines:?}");
         let line = &lines[0];
         assert!(line.contains(" INFO "), "level missing: {line:?}");
+        assert!(line.contains("selftest:"), "target missing: {line:?}");
         assert!(
-            line.contains("plotly::selftest"),
-            "target missing: {line:?}"
+            !line.contains("plotly::"),
+            "crate prefix should be stripped: {line:?}"
         );
         assert!(line.contains("hello world"), "message missing: {line:?}");
         assert!(line.contains("answer=42"), "field missing: {line:?}");

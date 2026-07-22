@@ -307,11 +307,11 @@ i zdebugować błąd. Czyli logi muszą być: ze znacznikiem czasu (ms), z pozio
 
 ** Format linii (przykład, pasteable)
 #+begin_example
-2026-06-14T12:34:56.789+02:00  INFO plotly::job: plot started job_id=7 file="logo.svg" ops=1240 est="3:21"
-2026-06-14T12:34:56.812+02:00 DEBUG plotly::plan: optimized pen_up_before_mm=4210 after_mm=1180 ms=12
-2026-06-14T12:34:56.820+02:00 TRACE plotly::driver: -> "G1 G90 X120.500 Y80.000 F2000"
-2026-06-14T12:34:56.944+02:00 TRACE plotly::driver: <- "ok"
-2026-06-14T12:34:57.001+02:00 TRACE plotly::driver: -> "?"   <- "<Run|MPos:120.500,80.000,5.000|FS:2000,0>"
+2026-06-14T12:34:56.789+02:00  INFO job: plot started job_id=7 file="logo.svg" ops=1240 est="3:21"
+2026-06-14T12:34:56.812+02:00 DEBUG plan: optimized pen_up_before_mm=4210 after_mm=1180 ms=12
+2026-06-14T12:34:56.820+02:00 TRACE transport: -> "G1 G90 X120.500 Y80.000 F2000"
+2026-06-14T12:34:56.944+02:00 TRACE transport: <- "ok"
+2026-06-14T12:34:57.001+02:00 TRACE transport: -> "?"   <- "<Run|MPos:120.500,80.000,5.000|FS:2000,0>"
 #+end_example
 
 ** Odporność na crash
