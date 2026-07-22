@@ -3,33 +3,72 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::time::Duration;
 
 use super::transport::Transport;
 
 /// Firmware version the mock reports on `v`/`V`.
-const MOCK_VERSION: &str = "DrawCore V2.10";
+pub const MOCK_VERSION: &str = "DrawCore V2.10";
 
 /// Fake plotter: auto-queues a canned response for each sent line and records
 /// what was sent so tests can assert on the exact wire traffic.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockTransport {
+    version: String,
+    /// When set, the board answers nothing at all (a dead or wrong-baud link).
+    mute: bool,
     responses: VecDeque<String>,
     sent: Vec<String>,
     realtime: Vec<u8>,
 }
 
+impl Default for MockTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockTransport {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_version(MOCK_VERSION)
     }
 
-    /// The canned response a real DrawCore would give for `line`.
-    fn auto_response(line: &str) -> String {
+    /// A board that identifies itself as `version` (use a foreign string to
+    /// exercise the "this is not a DrawCore" path).
+    pub fn with_version(version: &str) -> Self {
+        Self {
+            version: version.to_owned(),
+            mute: false,
+            responses: VecDeque::new(),
+            sent: Vec::new(),
+            realtime: Vec::new(),
+        }
+    }
+
+    /// A board that never answers.
+    pub fn unresponsive() -> Self {
+        Self {
+            mute: true,
+            ..Self::new()
+        }
+    }
+
+    /// Queue a line the board sends on its own, e.g. the boot banner that a
+    /// real DrawCore emits ~700 ms after the port opens (DESIGN.org §15.2).
+    pub fn push_unsolicited(&mut self, line: &str) {
+        self.responses.push_back(line.to_owned());
+    }
+
+    /// The canned reply lines a real DrawCore would give for `line`.
+    fn auto_response(&self, line: &str) -> Vec<String> {
         let cmd = line.trim();
         if cmd.starts_with('v') || cmd.starts_with('V') {
-            MOCK_VERSION.to_owned()
+            vec![self.version.clone()]
+        } else if cmd == "$B" {
+            // Button state plus its `ok` — the two lines the reference reads.
+            vec!["0".to_owned(), "ok".to_owned()]
         } else {
-            "ok".to_owned()
+            vec!["ok".to_owned()]
         }
     }
 
@@ -48,16 +87,18 @@ impl Transport for MockTransport {
     fn send_line(&mut self, line: &str) -> io::Result<()> {
         tracing::trace!(target: "plotly::transport", "-> {line:?}");
         self.sent.push(line.to_owned());
-        self.responses.push_back(Self::auto_response(line));
+        if !self.mute {
+            self.responses.extend(self.auto_response(line));
+        }
         Ok(())
     }
 
-    fn read_line(&mut self) -> io::Result<String> {
-        let response = self
-            .responses
-            .pop_front()
-            .unwrap_or_else(|| "ok".to_owned());
-        tracing::trace!(target: "plotly::transport", "<- {response:?}");
+    /// Answers instantly from the queue; `window` is irrelevant in-process.
+    fn read_line_for(&mut self, _window: Duration) -> io::Result<Option<String>> {
+        let response = self.responses.pop_front();
+        if let Some(line) = &response {
+            tracing::trace!(target: "plotly::transport", "<- {line:?}");
+        }
         Ok(response)
     }
 
@@ -72,11 +113,16 @@ impl Transport for MockTransport {
 mod tests {
     use super::*;
 
+    const NO_WAIT: Duration = Duration::from_millis(0);
+
     #[test]
     fn version_query_returns_version() {
         let mut t = MockTransport::new();
         t.send_line("v").unwrap();
-        assert_eq!(t.read_line().unwrap(), MOCK_VERSION);
+        assert_eq!(
+            t.read_line_for(NO_WAIT).unwrap().as_deref(),
+            Some(MOCK_VERSION)
+        );
         assert_eq!(t.sent(), &["v".to_owned()]);
     }
 
@@ -84,7 +130,28 @@ mod tests {
     fn command_returns_ok() {
         let mut t = MockTransport::new();
         t.send_line("G1 X10 Y10 F2000").unwrap();
-        assert_eq!(t.read_line().unwrap(), "ok");
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap().as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn button_query_returns_state_and_ok() {
+        let mut t = MockTransport::new();
+        t.send_line("$B").unwrap();
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap().as_deref(), Some("0"));
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap().as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn nothing_queued_reads_as_none() {
+        let mut t = MockTransport::new();
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap(), None);
+    }
+
+    #[test]
+    fn unresponsive_board_never_answers() {
+        let mut t = MockTransport::unresponsive();
+        t.send_line("v").unwrap();
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap(), None);
     }
 
     #[test]
@@ -100,8 +167,11 @@ mod tests {
         let mut t = MockTransport::new();
         t.send_line("v").unwrap();
         t.send_line("G1 X0 Y0").unwrap();
-        assert_eq!(t.read_line().unwrap(), MOCK_VERSION);
-        assert_eq!(t.read_line().unwrap(), "ok");
+        assert_eq!(
+            t.read_line_for(NO_WAIT).unwrap().as_deref(),
+            Some(MOCK_VERSION)
+        );
+        assert_eq!(t.read_line_for(NO_WAIT).unwrap().as_deref(), Some("ok"));
     }
 
     #[test]
@@ -114,7 +184,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let mut t = MockTransport::new();
             t.send_line("v").unwrap();
-            let _ = t.read_line().unwrap();
+            let _ = t.read_line_for(NO_WAIT).unwrap();
         });
 
         let logs = ring.tail(100).join("\n");

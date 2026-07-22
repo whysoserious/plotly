@@ -8,6 +8,7 @@ use ratatui::backend::Backend;
 use ratatui::Terminal;
 
 use crate::logging::LogRing;
+use crate::plotter::Connection;
 use crate::{tui, ui};
 
 /// Idle poll timeout: bounds how often we wake to pick up new log lines while
@@ -16,14 +17,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Top-level TUI application state.
 pub struct App {
+    connection: Connection,
     log: LogRing,
     last_log_len: usize,
     should_quit: bool,
 }
 
 impl App {
-    pub fn new(log: LogRing) -> Self {
+    pub fn new(connection: Connection, log: LogRing) -> Self {
         Self {
+            connection,
             last_log_len: log.len(),
             log,
             should_quit: false,
@@ -63,5 +66,9 @@ impl App {
 
     pub fn log(&self) -> &LogRing {
         &self.log
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
     }
 }

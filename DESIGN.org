@@ -622,7 +622,7 @@ od razu*. Zamiast tego:
   ~1A86:7523/8040~; ~--port~ wymusza. /Test:/ ~--simulate~ → „mock"; bez sprzętu i bez ~--port~
   → czytelny błąd „no iDraw found". /Auto:/ U: funkcja filtrująca listę portów po VID/PID
   (na ustawionej liście atrap ~SerialPortInfo~).
-- [ ] *1.2 ✱ Otwarcie + handshake.* RTS/DTR=false, baud 115200; sekwencja ~$B\r~→2 linie→
+- [X] *1.2 ✱ Otwarcie + handshake.* RTS/DTR=false, baud 115200; sekwencja ~$B\r~→2 linie→
   ~reset_input_buffer~→~v\r~; parsuj ~"DrawCore V…"~ → ~Event::Connected{version}~ (2.1).
   /Test:/ ✱ realny iDraw: status „Connected DrawCore V2.xx" w TUI, pełen handshake w TRACE.
   /Auto:/ I: ~MockTransport~ przechodzi handshake i zwraca wersję; zły prefiks → błąd połączenia.

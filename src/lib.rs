@@ -26,48 +26,35 @@ pub fn run() -> io::Result<()> {
         panic!("synthetic panic to exercise the logging panic hook");
     }
 
-    // Resolve the plotter before entering the alternate screen, so a "no iDraw
-    // found" message lands on a normal terminal instead of being wiped by it.
-    let port = match plotter::serial::resolve_port(args.simulate, args.port.as_deref()) {
-        Ok(port) => port,
-        Err(err) => {
-            tracing::error!(%err, "no plotter to connect to");
-            eprintln!("plotly: {err}");
-            return Err(io::Error::new(io::ErrorKind::NotFound, err));
-        }
-    };
+    // Resolve and greet the plotter before entering the alternate screen, so
+    // failures land on a normal terminal instead of being wiped by the TUI.
+    let port = plotter::serial::resolve_port(args.simulate, args.port.as_deref())
+        .map_err(|err| fail("no plotter to connect to", err))?;
     match &port {
-        plotter::serial::PortChoice::Mock => {
-            tracing::info!("using the mock plotter (--simulate)");
-            probe_mock();
-        }
+        plotter::serial::PortChoice::Mock => tracing::info!("using the mock plotter (--simulate)"),
         plotter::serial::PortChoice::Serial(path) => {
             tracing::info!(%path, baud = args.baud, "plotter port selected");
         }
     }
+    let connection =
+        plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
-    run_tui(log)
+    run_tui(connection, log)
+}
+
+/// Report a startup failure on stderr and in the log, as an `io::Error`.
+fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> io::Error {
+    tracing::error!(%err, "{context}");
+    eprintln!("plotly: {err}");
+    io::Error::other(err)
 }
 
 /// Enter the terminal, wire restore-on-panic/-signal, and run the TUI app.
-fn run_tui(log: logging::LogRing) -> io::Result<()> {
+fn run_tui(connection: plotter::Connection, log: logging::LogRing) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
     tui::install_panic_restore();
     tui::install_signal_restore();
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(log).run(&mut terminal)
-}
-
-/// Temporary 0.6 demo: probe the mock transport so `--simulate` shows wire
-/// traffic in the log. Replaced by the worker that owns a `Transport` (step 2.4).
-fn probe_mock() {
-    use plotter::mock::MockTransport;
-    use plotter::transport::Transport;
-
-    let mut transport = MockTransport::new();
-    let _ = transport.send_line("v");
-    if let Ok(version) = transport.read_line() {
-        tracing::info!(%version, "mock transport probe (--simulate)");
-    }
+    app::App::new(connection, log).run(&mut terminal)
 }

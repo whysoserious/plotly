@@ -16,7 +16,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .split(frame.area());
 
-    panels::status(frame, areas[0]);
+    panels::status(frame, areas[0], app);
     panels::canvas(frame, areas[1]);
     panels::log(frame, areas[2], app);
 }

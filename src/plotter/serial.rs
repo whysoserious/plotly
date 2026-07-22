@@ -66,15 +66,11 @@ impl SerialTransport {
         let deadline = Instant::now() + window;
         let mut lines = Vec::new();
         loop {
-            while let Some(line) = take_line(&mut self.pending) {
-                tracing::trace!(target: "plotly::transport", "<- {line:?}");
-                lines.push(line);
-            }
-            if Instant::now() >= deadline {
-                return lines;
-            }
-            if let Err(err) = self.fill_once() {
-                if err.kind() != io::ErrorKind::TimedOut {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.read_line_for(left) {
+                Ok(Some(line)) => lines.push(line),
+                Ok(None) => return lines,
+                Err(err) => {
                     tracing::warn!(%err, "serial read failed");
                     return lines;
                 }
@@ -108,13 +104,22 @@ impl Transport for SerialTransport {
         self.port.flush()
     }
 
-    fn read_line(&mut self) -> io::Result<String> {
+    fn read_line_for(&mut self, window: Duration) -> io::Result<Option<String>> {
+        let deadline = Instant::now() + window;
         loop {
             if let Some(line) = take_line(&mut self.pending) {
                 tracing::trace!(target: "plotly::transport", "<- {line:?}");
-                return Ok(line);
+                return Ok(Some(line));
             }
-            self.fill_once()?;
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            match self.fill_once() {
+                Ok(()) => {}
+                // A read timeout is the port being quiet, not a failure.
+                Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+                Err(err) => return Err(err),
+            }
         }
     }
 
