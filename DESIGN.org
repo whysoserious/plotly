@@ -37,63 +37,67 @@ Referencja dowodzi tylko jednej konkretnej drogi sterowania; nasza prostsza drog
 ** 2.1 Połączenie
 | Parametr | Wartość |
 |----------+---------|
-| Układ USB-serial | CH340 (QinHeng) |
-| VID:PID | ~1A86:7523~ *lub* ~1A86:8040~ |
+| Układ USB-serial | CH340 (QinHeng); *u nas enumeruje się jako CDC-ACM* → ~/dev/ttyACM0~, nie ~ttyUSB~ (✔ spike) |
+| VID:PID | ~1A86:7523~ *lub* ~1A86:8040~ (nasza sztuka: ~8040~) — *filtruj po VID:PID, nie po nazwie portu* |
 | Baud | *115200*, 8N1 |
-| Sygnały | *RTS = false, DTR = false* (inaczej płytka się resetuje) |
-| Handshake przy otwarciu | wyślij ~$B\r~, odczytaj 2 linie, ~reset_input_buffer~, potem ~v\r~ (małe!) |
-| Identyfikacja | odpowiedź na ~v~/~V~ zaczyna się od ~"DrawCore V…"~ |
+| Sygnały | *RTS = false, DTR = false* — ale patrz niżej: *i tak resetuje przy otwarciu* |
+| *Po otwarciu portu* | *najpierw nasłuchuj ≥1 s* — płytka restartuje i po ~700 ms wysyła banner ~Grbl 1.1h DrawCore V2.09 ['$' for help]~. *Komenda wysłana wcześniej przepada* (✔ spike, 15.2) |
+| Handshake | (po bannerze) ~$B\r~ → 2 linie (~0~ + ~ok~), ~reset_input_buffer~, potem ~v\r~ (małe!) |
+| Identyfikacja | ~v~/~V~ → ~"DrawCore V2.09.20230318"~; ~$I~ → ~[VER:1.1h DrawCore V2.09…]~, ~[OPT:VZHDL,15,128]~ |
+| Reset stanu | *stany modalne przeżywają rozłączenie* — po połączeniu jawnie wyślij ~G21 G90~ + feed (✔ spike) |
 | Terminator komend | ~\r~ |
-| Odpowiedź OK | małe ~ok~ (Grbl); błąd: ~error:<n>~ |
+| Odpowiedź OK | małe ~ok~ (Grbl); błąd: ~error:<n>~ (~error:2~ = złe ~$~, ~error:20~ = nieobsługiwany G-code) |
 
 ** 2.2 Komendy (mapa protokołu)
-*UWAGA — to jest nasz docelowy, „czysty" model (❓), nie to, co robi referencja.*
-Chcemy: tryb metryczny ~G21~ + *współrzędne absolutne ~G90~ w mm*, a kinematykę CoreXY
-i planowanie przyspieszeń zostawić firmware'owi. *To by ogromnie upraszczało hosta* — ale
-*referencyjny sterownik robi inaczej* (~G91~ względne, jednostki krokowe, transform osi na
-hoście, planowanie trajektorii na hoście). Szczegóły i konsekwencje: *2.3*. Dopóki spike
-(Faza 0) nie potwierdzi, że firmware przyjmuje ~G21~/~G90~/mm i sam planuje — *zakładamy,
-że może być potrzebna ścieżka referencyjna* i nie budujemy nieodwracalnie na „czystym Grblu".
+*ROZSTRZYGNIĘTE w spike'u 0.7 (szczegóły i dowody: 15).* Firmware to *prawdziwy Grbl 1.1h*:
+przyjmuje ~G21~ + *współrzędne absolutne ~G90~ w mm* (to jego stan domyślny), sam planuje
+przyspieszenia, ma komplet komend realtime i raport ~?~ w formacie Grbla. *Kinematyka nie jest
+CoreXY* (brak flagi ~C~ w ~[OPT:…]~). Czyli: *idziemy „czystym Grblem", a ścieżka referencyjna
+z 2.3 zostaje wyłącznie jako materiał historyczny* — nie portujemy planera trajektorii ani
+jednostek krokowych. Poniższa tabela jest już potwierdzona sprzętowo, o ile nie zaznaczono ❓.
 
 | Funkcja | Komenda | ✔/❓ | Uwagi |
 |---------+---------+------+-------|
-| Ruch liniowy XY | ~G1 X<x> Y<y> F<feed>~ | ❓ | nasz cel: ~G90~ abs w mm. *Referencja: ~G91~ względne, jednostki krokowe, osie zamienione/odbite* (2.3) |
-| Szybki przejazd | ~G0 X<x> Y<y>~ | ❓ | pen-up transit; w referencji nieużywane (jest zwykłe ~G1~) |
+| Ruch liniowy XY | ~G1 X<x> Y<y> F<feed>~ | ✔ | *~G90~ abs w mm, i to jest domyślny stan firmware'u.* Płytka planuje przyspieszenia sama |
+| Szybki przejazd | ~G0 X<x> Y<y>~ | ❓ | pen-up transit; nie testowane w spike'u, ale to standardowy Grbl |
 | Pen DOWN | ~G1 G90 Z<down> F<rate>~ | ✔ | ~Z=5~ w dół; ~rate~≈5000. *Po nim leci jeszcze ~G1 F<feed_xy>~* (ustawia feed XY!) |
 | Pen UP | ~G1 G90 Z<up> F<rate>~ | ✔ | ~Z=0.5~ w górę (większe Z = niżej). Też + ~G1 F<feed_xy>~ |
 | Toggle pen | ~$TP<up>,<down>~ | ✔ | np. ~$TP0.5,5.0~ (poprzedzone ~G90 G1 F<speed>~) |
-| Laser / serwo PWM | ~G1 F<f> M3 S<val>~ / ~M5~ | ✔/❓ | ~M3 S~ ✔ (PWM); ~M5~ ❓ |
-| Dwell | ~G4 P<sekundy>~ | ❓ | w referencji *zakomentowane* (no-op); P=sekundy prawdopodobne |
-| Homing | ~$H~ | ✔ | cykl bazowania na *krańcówkach* — iDraw to ma! |
+| Laser / serwo PWM | ~G1 F<f> M3 S<val>~ / ~M5~ | ✔ | ~M5~ przyjmowane (~ok~); ~$32=1~ → laser mode włączony |
+| Dwell | ~G4 P<sekundy>~ | ❓ | w referencji *zakomentowane* (no-op); w Grblu 1.1 P=sekundy |
+| Homing | ~$H~ | ✔ | 3–7 s, ~<Home\|…>~ → ~ok~; *po nim ~MPos=0,0,0~* (róg = origin maszyny, 2.4) |
 | Usypianie silników | ~$SLP~ | ✔ | „disable motors" |
-| Status (realtime) | ~?~ | ❓ | raport + ~MPos~ — *w referencji NIEUŻYWANE*; format niżej to założenie Grbla |
-| Pauza (realtime) | ~!~ | ❓ | feed-hold — *w referencji NIEUŻYWANE* (pauza kooperatywna, 2.3) |
-| Wznów (realtime) | =~= | ❓ | cycle-start — *nieużywane w referencji* |
-| Abort (realtime) | ~0x18~ (Ctrl-X) | ❓ | soft-reset — *nieużywane*; po nim zwykle ALARM → ~$H~/~$X~ |
-| Jog-cancel (realtime) | ~0x85~ | ❓ | *nieużywane w referencji* |
-| Jog | ~$J=G91 X<d> Y<d> F<f>~ | ❓ | *nieużywane*; fallback: ~G91 G1 ...~ (też transform osi!) |
-| Query pen | ~$QP~ | ✔ | ~0~ = down |
-| Przycisk / handshake | ~$B~ | ✔ | też „czy wciśnięto przycisk" (kooperatywna pauza) |
-| Nickname | ~$QT~ / ~$ST=<name>~ | ✔ | firmware ≥ 2.13 |
-| Ustawienia Grbl | ~$$~ | ✔ | przez ~query_all~; steps/mm, rate, accel |
-| Wersja | ~v~ / ~V~ | ✔ | ~"DrawCore V2.xx"~ |
+| Status (realtime) | ~?~ | ✔ | ~<Idle\|MPos:…\|FS:…\|WCO:…>~ — format Grbla potwierdzony |
+| Pauza (realtime) | ~!~ | ✔ | feed-hold w trakcie ruchu → ~<Hold:0\|MPos:…>~ |
+| Wznów (realtime) | =~= | ✔ | cycle-start; ruch dokańcza się do końca zadanego segmentu |
+| Abort (realtime) | ~0x18~ (Ctrl-X) | ✔ | natychmiastowy reset + banner; *pozycja zachowana*, stan ~Idle~, ~$H~ *nie* wymagany |
+| Jog-cancel (realtime) | ~0x85~ | ✔ | przyjmowany bez błędu |
+| Jog | ~$J=G91 X<d> Y<d> F<f>~ | ✔ | ~ok~ + realny ruch (10 mm) |
+| Query pen | ~$QP~ | ❓ | zwraca ~1~, ale *nie zmienia się* po ruchach Z z G-code — do wyjaśnienia (15.3) |
+| Przycisk / handshake | ~$B~ | ✔ | zwraca 2 linie: stan przycisku (~0~) + ~ok~ |
+| Nickname | ~$QT~ / ~$ST=<name>~ | ✔ | u nas puste (~ok~); firmware ≥ 2.13 |
+| Ustawienia Grbl | ~$$~ | ✔ | pełny dump Grbl 1.1; wartości naszej maszyny w 15.1 |
+| Wersja | ~v~ / ~V~ | ✔ | ~"DrawCore V2.09.20230318"~; ~$I~ dokłada ~[VER:…]~/~[OPT:…]~ |
 
-Format raportu ~?~ (*założenie* formatu Grbla — niepotwierdzone; pola rozdzielone ~|~):
+Format raportu ~?~ (*potwierdzony na sprzęcie*; pola rozdzielone ~|~):
 #+begin_example
-<Run|MPos:120.500,80.000,5.000|FS:2000,0>
+<Idle|MPos:0.000,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
+<Run|MPos:6.010,0.000,0.501|FS:300,0>
+<Hold:0|MPos:7.740,0.000,0.501|FS:0,0>
 #+end_example
 
 #+begin_quote
-*Najwyższe ryzyko projektu:* komendy realtime (~!~, =~=, ~?~, ~0x18~, ~0x85~) i ~$J=~
-*nie występują w referencyjnym sterowniku* — to czyste założenia. Na nich stoją: live-pozycja,
-progress z ~?~, „Stop now", jog. Jeśli firmware ich nie ma, sekcje 4/8/9/3.6 wymagają modelu
-kooperatywnego (2.3). *Zweryfikować w Fazie 0, zanim cokolwiek na nich zbudujemy.*
-Semantyka osi Z (down ~Z=5~ > up ~Z=0.5~ → większe Z = niżej) jest ✔, ale i ją potwierdzić.
+*Największe ryzyko projektu — zdjęte (spike 0.7).* Komendy realtime (~!~, =~=, ~?~, ~0x18~,
+~0x85~) i ~$J=~ *działają*, a ~G90~ abs w mm jest potwierdzone. Live-pozycja, progress z ~?~,
+„Stop now" i jog stoją na twardym gruncie; model kooperatywny z 2.3 *nie jest potrzebny*.
+*Uwaga:* ~ok~ znaczy „przyjęto do bufora" (15 bloków), *nie* „narysowano" — to ma znaczenie
+dla ~committed_index~ (6) i dla progressu (bierzemy go z ~?~/~MPos~, nie z liczby ~ok~).
 #+end_quote
 
-** 2.3 Jak NAPRAWDĘ robi to referencja (fakty ✔ — i konsekwencje)
-To jest udokumentowana, działająca ścieżka. Jeśli „czysty Grbl" (2.2) nie wypali, *to jest
-nasz fallback* — i tak czy siak musimy znać ten model dla wznawiania i transformu osi.
+** 2.3 Jak robi to referencja — materiał historyczny (fakty ✔)
+*Po spike'u 0.7 ta ścieżka NIE jest naszym planem ani fallbackiem* — firmware to zwykły
+Grbl 1.1h, więc nie portujemy planera trajektorii, jednostek krokowych ani transformu CoreXY.
+Zostawiamy opis, bo tłumaczy zachowania referencyjnego sterownika i wygląd starych logów.
 
 1. *Ruchy XY są względne (~G91~), nie absolutne.* Każdy segment: ~G1 G91 X.. Y..~
    (~drawcore_motion.py:65,74~; ~dripfeed.feed_sm~). ~G90~ w referencji leci *tylko dla Z*
@@ -115,15 +119,23 @@ nasz fallback* — i tak czy siak musimy znać ten model dla wznawiania i transf
    Ctrl-C (~idraw.py~ ~pause_check~, ~plot_status.resume.check_button~; wołane w pętli
    ~dripfeed.feed~). Brak feed-hold ~!~.
 
-*Konsekwencja dla nas:* niezależnie od wyniku spike'u musimy mieć jawny *transform
-„układ logiczny (SVG, mm) ↔ układ G-code maszyny"* (zamiana X↔Y, znaki, skala, origin po
-homingu). Bez tego rysunek wyjdzie obrócony/odbity/przeskalowany. Patrz też sekcja 6
-(wznawianie zależy od tego transformu) i ~$$~ (~steps/mm~ do skali).
+*Konsekwencja dla nas (po spike'u — transform okazał się trywialny, ✔ etap ~draw~):*
+#+begin_example
+X_wire =  X_logiczny        (logiczne +X = w prawo, patrząc od przodu)
+Y_wire = -Y_logiczny        (logiczne +Y = ku operatorowi = wire -Y)
+skala  =  1:1 w mm          (kwadrat 40 mm wychodzi 40 mm linijką)
+origin =  róg po $H = lewy TYLNY róg, MPos 0,0,0
+pole   =  X ∈ ⟨0, +841⟩, Y ∈ ⟨0, −1189⟩ na drucie
+#+end_example
+Czyli ~Transform~ z kroków 1.6/2.2 to *odbicie znaku Y plus offset originu rysunku* — żadnej
+zamiany X↔Y, żadnych jednostek krokowych, żadnego CoreXY z 2.3. Origin *logiczny* (lewy górny
+róg kartki, konwencja SVG z Y w dół) mapuje się wtedy 1:1: „w dół kartki" = wire ~−Y~ = ku
+operatorowi, co zgadza się z kierunkiem pola roboczego od rogu ~$H~.
 
-** 2.4 Granice pola i origin — to robi HOST, nie firmware (fakty ✔)
-Dwie powiązane rzeczy, które łatwo błędnie przypisać płytce. *Firmware nie pilnuje granic
-i nie ma trwałego układu absolutnego poza chwilą po ~$H~* — ruchy są względne (~G91~) i w
-jednostkach krokowych (2.3), więc płytka wykonuje zadany delta-ruch *na ślepo*.
+** 2.4 Granice pola i origin — bounds robi HOST, origin daje ~$H~ (fakty ✔)
+*Firmware nie pilnuje granic* — ~$20=0~ (soft limits off) i ~$21=0~ (hard limits off)
+potwierdzone w spike'u. *Ma natomiast* trwały układ absolutny w mm: po ~$H~ ~MPos=0,0,0~,
+a ~?~ w każdej chwili poda pozycję (nie musimy jej zgadywać dead-reckoningiem).
 
 *A. Bounds-check = wyłącznie host, dwupoziomowo (✔):*
 1. *Klipowanie planu przed drukiem* — ~boundsclip.clip_at_bounds()~. Host *geometrycznie
@@ -140,21 +152,19 @@ Jedyna ochrona sprzętowa to krańcówki, używane *tylko* w cyklu ~$H~ (nie pod
 *Nasza implementacja:* trzymamy *absolutną pozycję logiczną w mm* i sprawdzamy ją przed
 każdym ~Op~ względem pola z profilu (sekcja 10). Replikujemy oba poziomy: clip planu
 (~plan/~) + runtime clamp/odmowa dla jogu (~driver~/~geometry~). Firmware nas nie uratuje.
+(Opcja na przyszłość: włączyć ~$20=1~ i wpisać travel — ale to zmiana ustawień *maszyny*,
+robimy ją świadomie i osobno, nie po cichu przy starcie aplikacji.)
 
-*B. „Idź do 0,0" / SetOrigin = ~$H~ + offset modelu (✔):*
-Nie ma komendy „jedź do absolutnego 0,0". Referencja (~idraw.py:528-530~, tryb
-~machine_origin~) robi: ~$H~ (homing na krańcówkach → *róg sprzętowy*) → ~doMove(y_max·25.4,
-0, …)~ (*względny* ~G91~ przejazd ~+y_max~ z rogu do origin logicznego) → ~$SLP~. Czyli
-*róg sprzętowy ≠ origin logiczny*, stąd dodatkowy przejazd o pełny travel.
-Host *nie odczytuje pozycji* (~?~/~MPos~ nieużywane) — zna ją wyłącznie przez *dead-reckoning*:
-akumuluje wszystkie ruchy względne w ~pen.phys.xpos/ypos~ (~idraw.py:568-569~), startując od
-punktu zadanego homingiem. To *host definiuje*, gdzie jest 0,0, i sam to pilnuje — dlatego
-zanik prądu wymaga ponownego ~$H~ (sekcja 6).
-*Nasza implementacja:* ~SetOrigin~/go-to-0,0 = ~$H~ → przejazd offsetowy zależny od modelu →
-od tej pory absolutna pozycja mm utrzymywana po stronie hosta. *Jeśli* spike (Faza 0)
-potwierdzi ~G90~ abs w mm, alternatywą jest ~G90 G1 X0 Y0~ — ale to niepotwierdzona ścieżka
-„czystego Grbla" (sekcja 15). Budujemy na: homing + offset + dead-reckoning; ~G90 abs~ to
-opcjonalna optymalizacja po spike'u.
+*B. „Idź do 0,0" / SetOrigin = ~$H~, i to wystarcza (✔ spike):*
+Po ~$H~ firmware ustawia ~MPos = 0,0,0~ (~HOMING_FORCE_SET_ORIGIN~, flaga ~Z~ w ~[OPT:…]~),
+czyli *róg sprzętowy JEST originem maszyny* — odpada „przejazd offsetowy o pełny travel",
+który musiała robić referencja. Potwierdzone: ~G1 X2 Y-2~ → ~MPos:2.000,-2.000~, powtórka bez
+ruchu, ~G1 X0 Y0~ wraca do rogu.
+*Nasza implementacja:* ~SetOrigin~/go-to-0,0 = ~$H~ (raz na sesję) → dalej ~G90~ absolutnie
+w mm, a pozycję *czytamy z ~?~*, nie zgadujemy. Origin logiczny rysunku (lewy dolny róg
+kartki itp.) to nasz własny offset w ~geometry.rs~ — albo work offset G54, jeśli okaże się
+wygodniejszy. Zanik prądu nadal wymaga ~$H~ (sekcja 6), ale ~0x18~ (soft reset) *pozycji nie
+gubi* (15.1).
 
 * 3. Funkcje
 ** 3.1 MVP
@@ -434,18 +444,21 @@ niełapany-w-tekście skrót* (np. ~Ctrl-C~/~Ctrl-X~) działający we wszystkich
 od ~S~.
 
 * 9. Stop / stop po czasie / stop + pen up po czasie
-*Dwie drogi* (wybór po spike'u, 2.3) — projektujemy obie, bo realtime jest ❓:
+*Droga A wybrana* — spike 0.7 potwierdził realtime (~!~, =~=, ~0x18~, ~0x85~; 15.1).
+B zostaje jako opis awaryjny (np. gdyby ~!~ przestało wystarczać przy pełnym buforze).
 
-*A. Realtime (jeśli DrawCore wspiera ~!~/=~=/~0x18~):*
-- *Stop now* → ~!~ (feed-hold): hamuje w ruchu, zachowuje pozycję → ~Paused~. Wznów = =~=.
+*A. Realtime (✔ potwierdzone na sprzęcie):*
+- *Stop now* → ~!~ (feed-hold): hamuje w ruchu, zachowuje pozycję (~<Hold:0|MPos:…>~) → ~Paused~.
+  Wznów = =~= (ruch dokańcza zadany segment).
 - *Stop + pen up* → ~!~, *poczekaj aż stanie*, *potem Z-up* (pen up) → ~Paused-pen-up~.
-  *Kolejność:* pen-up *przed* ewentualnym soft-resetem — po ~0x18~ Grbl wpada w ALARM
-  i *odrzuca ruchy* do ~$H~/~$X~, więc Z-up po resecie się NIE wykona.
+  *Kolejność:* pen-up *przed* ewentualnym soft-resetem. /Uwaga:/ na naszej maszynie ~0x18~
+  *nie* wpadał w ALARM (stan ~Idle~, pozycja zachowana, ~$H~ niewymagany — 15.1), ale
+  kolejność „pen-up najpierw" zostawiamy jako bezpieczniejszą i przenośną.
 - *Panic STOP* → *najpierw* Z-up (jeśli zdąży), *potem* ~0x18~. /Świadomy kompromis:/ jeśli
   ma być natychmiast i bezwarunkowo, ~0x18~ idzie pierwszy i *pióro zostaje na dole* — nie da
-  się mieć naraz „natychmiast zabij ruch" i „kontrolowane pen-up". Po panice: ~$H~ przed wznową.
+  się mieć naraz „natychmiast zabij ruch" i „kontrolowane pen-up".
 
-*B. Kooperatywny fallback (jak referencja — gdy brak realtime):*
+*B. Kooperatywny fallback (jak referencja — gdyby realtime zawiodło):*
 - Stop = *przestań wysyłać kolejne segmenty* i podnieś pióro przy najbliższej granicy op.
   Worker sprawdza Command/deadline *między op* (try_recv, nieblokująco). „Natychmiastowość"
   jest ograniczona długością op → trzymaj op krótkie (granularność, sekcja 6).
@@ -470,10 +483,15 @@ Domyślne (iDraw): pen-down ~Z=5~, pen-up ~Z=0.5~, feed pióra ~5000~; XY pen-do
 pen-up ~F8000~; accel 75; smoothness 10; cornering 10; ~servo_timeout~ 60000 ms; ~page_delay~
 15 s; warstwy 1–1000; clip-to-page on.
 
-*Uwaga o jednostkach:* powyższe mm to *pole logiczne*. Jednostki *na drucie* nie muszą być mm
-(referencja: jednostki krokowe ze ~step_scale~ i ~/100~ — 2.3). Skalę/transform ustal w spike'u
-i trzymaj w profilu. Profile w *TOML*; gdzie się da, auto-odczyt z ~$$~ (steps/mm, rate, accel).
-Rozmiary AxiDraw — tylko jako referencja, gdyby kiedyś.
+*Nasza maszyna (odczyt z ~$$~ w spike'u 0.7 — 15.1):* travel ~$130/$131 = 841 × 1189 mm~
+(*A0*, X = 841, Y = 1189), ~$100/$101 = 100~ steps/mm, ~$102 = 85.8~ (Z, ~$132 = 10~ mm),
+max rate ~15000/12000/15000~ mm/min, accel ~3000~ mm/s², homing ~$23 = 5~ (X i Z w −, Y w +),
+pull-off ~$27 = 1~ mm. *To jest profil bazowy* — reszta tabeli zostaje dla innych modeli.
+
+*Uwaga o jednostkach — nieaktualna po spike'u:* jednostki na drucie *są milimetrami*
+(~G21~ + ~G90~ domyślne, ~$13=0~), więc żadnej skali krokowej z 2.3 nie liczymy. Profile
+w *TOML*; wymiary i limity *auto-odczytujemy z ~$$~* (~$130/$131~, ~$110/$111~, ~$120/$121~)
+i traktujemy plik profilu jako override. Rozmiary AxiDraw — tylko jako referencja, gdyby kiedyś.
 
 * 11. Stack technologiczny
 | Warstwa | Crate | Dlaczego |
@@ -592,7 +610,7 @@ od razu*. Zamiast tego:
   ~read_line~, ~write_realtime~) + ~mock.rs~: kolejkuje ~ok~, symuluje ~v~→~"DrawCore V2.10"~,
   loguje ~->~/~<-~ (TRACE). /Test:/ mały harness w ~--simulate~ wysyła ~v~ i loguje odpowiedź.
   /Auto:/ I: ~MockTransport~ na ~v~ zwraca wersję; na ~G1...~ zwraca ~ok~; TRACE zawiera obie linie.
-- [ ] *0.7 ✱ HARDWARE SPIKE (krytyczny, osobny binarny/przykład ~examples/spike.rs~).* Na
+- [X] *0.7 ✱ HARDWARE SPIKE (krytyczny, osobny binarny/przykład ~examples/spike.rs~).* Na
   realnym iDraw sprawdź ❓ z sekcji 2/15: czy działają ~?~/~!~/=~=/~0x18~/~0x85~/~$J=~; format
   ~<...|MPos:...>~; czy firmware przyjmuje ~G21~+~G90~ abs w mm i sam planuje; zmierz transform
   osi i skalę, kierunek homingu, offset origin (2.4), zachowanie po ~0x18~. *Zapisz wyniki do
@@ -712,18 +730,57 @@ od razu*. Zamiast tego:
   nie mają własnego kroku. /Test:/ per-funkcja na ~--simulate~ + ✱ wybrane na sprzęcie.
   /Auto:/ U: hatch-fill prostokąta → linie w zadanym odstępie, w obrębie kształtu.
 
-* 15. Otwarte decyzje / do weryfikacji na sprzęcie
-- *Czy w ogóle „czysty Grbl":* czy firmware przyjmuje ~G21~ + ~G90~ absolutne w mm i sam liczy
-  CoreXY + przyspieszenia — czy musimy iść ścieżką referencji (~G91~ + transform + planer na hoście, 2.3).
-- *Transform „logiczny↔G-code":* zamiana X↔Y, znaki, skala (~step_scale~/~/100~), origin po ~$H~.
-- *Granice pola:* czy firmware ma jakiekolwiek soft-limity, czy bounds to *wyłącznie host*
-  (clip planu + clamp/odmowa jogu, 2.4); zachowanie krańcówek poza ~$H~ (ALARM czy zgrzyt?).
-- *Origin / 0,0:* offset modelu po ~$H~ (referencja: ~+y_max~), kierunek homingu, czy ~G90 G1 X0 Y0~
-  w ogóle działa (czy zostajemy przy ~$H~ + offset + dead-reckoning, 2.4).
-- Dokładny zestaw i zachowanie komend realtime (~!~, =~=, ~?~, ~0x18~, ~0x85~, ~$J=~) — *czy istnieją*.
-- Zachowanie po soft-reset (czy wymaga ~$H~/~$X~); kierunek homingu, znak ~MPos~, work offset (G54).
-- *Semantyka ~ok~* (przyjęto vs wykonano) i *głębokość bufora planera* — do poprawnego ~committed_index~ (6).
-- Semantyka i jednostki osi Z (down ~Z=5~ > up ~Z=0.5~) oraz argumentów ~$TP~.
-- Czy ~$$~ zwraca steps/mm / accel (do profili, skali i estymacji).
-- Streaming: send→~ok~ (prostsze + dokładne checkpointy) vs character-counting (perf) — 4 i 6.
-- Kodowanie odpowiedzi, timeouty, retry, obsługa ~error:<n>~ / ~ALARM~; detekcja utraty USB w trakcie.
+* 15. Wyniki spike'u 0.7 (2026-07-22) i to, co zostało otwarte
+Spike wykonany na fizycznej maszynie (~examples/spike.rs~, port ~/dev/ttyACM0~, VID:PID
+~1A86:8040~). Transkrypty: ~spike-report.md~ + ~spike.log~ (TRACE). *Zakład z 2.2 wygrany:
+to jest prawdziwy Grbl 1.1h* — poniżej fakty, które go zamieniają w projekt.
+
+** 15.1 Fakty potwierdzone (❓ → ✔)
+| Pytanie | Odpowiedź (✔) | Dowód |
+|---------+---------------+-------|
+| Czy „czysty Grbl"? | *TAK.* ~Grbl 1.1h DrawCore V2.09~; ~$I~ → ~[VER:1.1h DrawCore V2.09.20230318:]~, ~[OPT:VZHDL,15,128]~ | ~$I~ |
+| ~G21~ + ~G90~ abs w mm | *TAK, i to jest stan domyślny.* ~$G~ → ~[GC:G0 G54 G17 G21 G90 G94 …]~ | ~$G~ |
+| Absolut naprawdę absolutny | ~G1 X2 Y-2~ → ~MPos:2.000,-2.000~; *ta sama linia powtórnie = zero ruchu*; ~G1 X0 Y0~ → wraca do 0,0 | etap ~abs~ |
+| Realtime ~?~ | *TAK*, format dokładnie jak zakładany: ~<Idle\|MPos:0.000,0.000,0.000\|FS:0,0\|WCO:…>~, okresowo ~Ov:100,100,100~ | etap ~passive~ |
+| Realtime ~!~ / =~= | *TAK.* ~!~ w trakcie ruchu → ~<Hold:0\|MPos:7.740,…>~; =~= wznawia (ruch dokończył pełne 40 mm) | etap ~realtime~ |
+| Realtime ~0x18~ | *TAK* — natychmiastowy reset + banner. *Pozycja przeżywa reset* (~MPos:50.000~ po ~0x18~), stan ~Idle~, bez ALARM-u, ~$H~ *nie* jest wymagany | etap ~realtime~ |
+| Realtime ~0x85~ | przyjmowany bez błędu (jog-cancel) | etapy ~passive~/~realtime~ |
+| ~$J=~ | *TAK.* ~$J=G91 X10 F1000~ → ~ok~ + ruch o 10 mm | etap ~realtime~ |
+| Kinematyka | *NIE CoreXY* — w ~[OPT:VZHDL,…]~ brak flagi ~C~; płytka liczy sama, host nie planuje | ~$I~ |
+| Semantyka ~ok~ | *„przyjęto do bufora", nie „narysowano"* — po ~ok~ pierwszy ~?~ pokazywał jeszcze ~Idle~, dopiero potem ~Run~ | etap ~realtime~ |
+| Bufory | ~[OPT:…,15,128]~ = *15 bloków planera, 128 B RX* | ~$I~ |
+| Soft limity | *WYŁĄCZONE* (~$20=0~), hard limity też (~$21=0~) → *bounds pilnuje wyłącznie host* (2.4) | ~$$~ |
+| Homing | ~$H~ → ~<Home\|…>~ → ~ok~, 3–7 s; *po nim ~MPos = 0,0,0~* (flaga ~Z~ = ~HOMING_FORCE_SET_ORIGIN~) | etap ~home~ |
+| Kierunek homingu | ~$23=5~ → X bazuje w −, Y w +, Z w − ⇒ *pole robocze: X ∈ ⟨0, +841⟩, Y ∈ ⟨0, −1189⟩* | ~$$~ + ruch ~X+2/Y−2~ |
+| *Kierunki fizyczne osi* | *wire X+ = w prawo*, *wire Y− = ku operatorowi* (czyli Y+ = w głąb); ⇒ *home = lewy tylny róg* | etap ~draw~ |
+| *Skala* | *1 jednostka = 1 mm* — narysowany kwadrat ~X+40/Y−40~ ma linijką *40 mm* na bok i jest zamknięty | etap ~draw~ |
+| Kinematyka (empirycznie) | kwadrat wychodzi kwadratem, przekątna trafia w róg ⇒ *zwykła kartezjańska*, bez sprzężenia osi | etap ~draw~ |
+| Semantyka Z | ~Z=5~ *rysuje* (pióro na papierze), ~Z=0.5~ podnosi ⇒ *większe Z = niżej* — potwierdzone rysunkiem, nie tylko referencją | etap ~draw~ |
+| Format błędów | ~error:2~ (złe słowo ~$~), ~error:20~ (nieobsługiwany G-code, np. ~G90.1~) | etap ~passive~ |
+| ~$B~ | zwraca *dwie linie*: wartość przycisku (~0~) + ~ok~ — stąd „czytaj 2 linie" w referencji | etap ~passive~ |
+| Jednostki raportu | mm (~$13=0~) | ~$$~ |
+
+*Ustawienia maszyny (~$$~, do profilu — 10):* ~$100/$101 = 100.000~ steps/mm X/Y, ~$102 = 85.800~
+(Z); max rate ~$110/$111/$112 = 15000/12000/15000~ mm/min; accel ~$120–$122 = 3000~ mm/s²;
+travel ~$130 = 841~, ~$131 = 1189~, ~$132 = 10~ mm (*format A0, X=841 × Y=1189*); homing
+~$24 = 200~ (feed), ~$25 = 5000~ (seek), ~$27 = 1~ mm pull-off; ~$32 = 1~ (laser mode on).
+
+** 15.2 Pułapka, która kosztowała pierwszy przebieg (✔, ważne dla 1.2)
+*Samo otwarcie portu resetuje płytkę.* Kernel podnosi DTR zanim zdążymy je opuścić; banner
+~Grbl 1.1h DrawCore V2.09 ['$' for help]~ przychodzi *~700 ms po ~open()~*. Komenda wysłana
+w tym oknie *przepada bez śladu* — w pierwszym przebiegu ~$H~ poszło 100 µs po otwarciu portu
+i homing po prostu się nie odbył (żadnego ~ok~, żadnego ALARM-u, cisza do timeoutu).
+*Wniosek:* handshake musi *najpierw nasłuchiwać* (≥1 s, banner ~Grbl~), a dopiero potem wysyłać.
+*Stany modalne przeżywają rozłączenie* (drugi przebieg wystartował z ~G91~ zostawionym przez
+pierwszy) — po połączeniu *jawnie* wysyłamy ~G21 G90~ i znany feed.
+
+** 15.3 Zostało otwarte
+- ~$QP~ *nie reaguje* na ruchy Z z G-code (stale ~1~) — sprawdzić, co właściwie raportuje
+  (stan serwa/~$TP~?). *Stan pióra bierzemy z ~MPos.z~*, nie z ~$QP~.
+- Kalibracja Z pod konkretne pióro/podłoże: ~Z=5~ rysuje na naszym zestawie, ale to wartość
+  do wystawienia w profilu/kreatorze (5.4), nie stała w kodzie (~$132 = 10~ = max travel Z).
+- Zachowanie krańcówek *poza* ~$H~ przy ~$21=0~ (zgrzyt vs cokolwiek) — nie testowane celowo.
+- Głębokość bufora w praktyce (15 bloków) vs wybór streamingu: send→~ok~ (prostsze
+  checkpointy — 6) vs character-counting (perf) — decyzja w Fazie 2.
+- Obsługa ~error:<n>~/~ALARM~ w runtime, timeouty, retry, detekcja utraty USB w trakcie druku.
+- Czy ~$SLP~ gubi pozycję (po ~0x18~ jej nie gubi) — istotne dla wznawiania (6).

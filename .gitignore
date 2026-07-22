@@ -20,3 +20,6 @@ Icon
 
 # Plotly runtime output (default log is ./plotly.log; --log-file may add others)
 *.log
+
+# Hardware spike transcript (step 0.7); its conclusions go into DESIGN.org §15
+/spike-report.md
