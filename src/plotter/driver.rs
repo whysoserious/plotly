@@ -12,6 +12,11 @@ use super::Connection;
 /// How long a command may take to be acknowledged.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a homing cycle may take. Unlike every other command, `$H` answers
+/// `ok` only when the cycle *finishes* — measured at 3–7 s on an A0 machine
+/// (spike 0.7, §15.1), but a full-length seek from the far corner is slower.
+const HOMING_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Where the pen is. Tracked here because the firmware cannot tell us: `$QP`
 /// answers `1` regardless of the Z axis (spike 0.7, §15.3), so the host owns
 /// this state — as it does the position.
@@ -140,6 +145,31 @@ impl Driver {
         }
     }
 
+    /// Run a homing cycle (`$H`).
+    ///
+    /// This blocks until the machine reports `ok`, which for `$H` means the
+    /// cycle is over, not merely queued. Afterwards `MPos` is `0,0,0` — the
+    /// home corner *is* the machine origin on this firmware (§2.4) — and Z is
+    /// at 0, i.e. above the pen-up height, so the pen counts as up.
+    pub fn home(&mut self) -> Result<(), DriverError> {
+        tracing::info!("homing");
+        self.command_within("$H", HOMING_TIMEOUT)?;
+        self.pen = Pen::Up;
+        tracing::info!("homed; machine origin is now the home corner");
+        Ok(())
+    }
+
+    /// Release the steppers (`$SLP`).
+    ///
+    /// After this the carriage can be pushed by hand, so the machine position
+    /// stops being trustworthy: whatever we knew about `MPos` is stale until
+    /// the next `$H` (§2.4).
+    pub fn disable_motors(&mut self) -> Result<(), DriverError> {
+        self.command("$SLP")?;
+        tracing::warn!("motors disabled; position is unknown until the next homing");
+        Ok(())
+    }
+
     /// Move the pen to `target`, then restore the XY feed rate.
     ///
     /// The second line matters: `F` is modal in Grbl, so without it every
@@ -162,8 +192,13 @@ impl Driver {
 
     /// Send one line and wait for its `ok`.
     fn command(&mut self, line: &str) -> Result<(), DriverError> {
+        self.command_within(line, REPLY_TIMEOUT)
+    }
+
+    /// Send one line and wait up to `timeout` for its `ok`.
+    fn command_within(&mut self, line: &str, timeout: Duration) -> Result<(), DriverError> {
         self.connection.transport.send_line(line)?;
-        let deadline = Instant::now() + REPLY_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.connection.transport.read_line_for(left)? {

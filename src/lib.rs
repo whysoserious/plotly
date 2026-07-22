@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod keys;
 pub mod logging;
 pub mod plotter;
 pub mod tui;

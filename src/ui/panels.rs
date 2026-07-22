@@ -9,11 +9,14 @@ use crate::app::App;
 /// Connection / job status. Job state follows once the worker exists (2.4).
 pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     let driver = app.driver();
+    let activity = match app.busy() {
+        Some(label) => format!("{label}…"),
+        None => format!("pen {}", driver.pen()),
+    };
     let text = format!(
-        "Connected {} on {} — pen {} ([ up, ] down, space toggle)",
+        "Connected {} on {} — {activity} ([ up, ] down, space toggle, h home, d motors off)",
         driver.version(),
         driver.port(),
-        driver.pen()
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));
     frame.render_widget(widget, area);

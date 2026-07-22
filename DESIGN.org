@@ -427,6 +427,7 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~Space~ | toggle pen (~$TP~) |
 | ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
 | ~h~ | home (~$H~) |
+| ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
 | ~o~ | set origin (work offset) |
 | ~f~ | frame — obrysuj bounding box pracy (pen-up) |
 | ~g~ | go-to XY (wpisz współrzędne) |
@@ -633,7 +634,7 @@ od razu*. Zamiast tego:
   ~1~, 15.3), więc po pierwszej zgubionej komendzie rozjechałby się z naszym. *Stan pióra
   trzyma host* (jak pozycję). /Test:/ ✱ pióro fizycznie idzie w dół/górę. /Auto:/ I: ~pen_down~
   emituje *dokładnie* dwie linie w właściwej kolejności (Z, potem feed) — asercja na bufor mocka.
-- [ ] *1.4 ✱ Homing ~$H~ + ~$SLP~.* Klawisz ~h~ → ~$H~; disable silników. /Test:/ ✱ karetka
+- [X] *1.4 ✱ Homing ~$H~ + ~$SLP~.* Klawisz ~h~ → ~$H~; disable silników. /Test:/ ✱ karetka
   bazuje na krańcówkach; po ~$SLP~ silniki luźne. /Auto:/ I: ~h~ wysyła ~$H\r~.
 - [ ] *1.5 Konsola surowego G-code (~c~).* Modalne pole tekstowe (input wyłącza skróty
   jednoklawiszowe — sekcja 8!); wyślij dowolną linię, pokaż odpowiedź. /Test:/ wpisz ~M3 S100~

@@ -5,7 +5,6 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -65,7 +64,7 @@ pub fn install_panic_restore() {
 /// which would otherwise terminate the process without running [`Drop`].
 ///
 /// Keyboard Ctrl-C is delivered as a key event in raw mode (handled by
-/// [`is_quit_key`]), so this only fires for external signals.
+/// [`crate::keys::action_for`]), so this only fires for external signals.
 pub fn install_signal_restore() {
     let result = ctrlc::set_handler(|| {
         restore();
@@ -75,14 +74,4 @@ pub fn install_signal_restore() {
     if let Err(err) = result {
         tracing::warn!(%err, "could not install signal handler");
     }
-}
-
-/// True if `key` is a quit request (`q` or Ctrl-C), ignoring key-release events
-/// (Windows emits a Release alongside each Press).
-pub fn is_quit_key(key: &KeyEvent) -> bool {
-    if key.kind != KeyEventKind::Press {
-        return false;
-    }
-    key.code == KeyCode::Char('q')
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
