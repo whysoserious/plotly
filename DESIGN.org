@@ -618,7 +618,7 @@ od razu*. Zamiast tego:
   „czysty Grbl vs referencja". *Ten krok zamyka kształt Faz 2/3 i sekcji 4/8/9.*
 
 ** Faza 1 — połączenie i sterowanie ręczne (sprzęt)
-- [ ] *1.1 Wykrycie portu CH340.* ~serial.rs~: ~available_ports()~, filtr VID:PID
+- [X] *1.1 Wykrycie portu CH340.* ~serial.rs~: ~available_ports()~, filtr VID:PID
   ~1A86:7523/8040~; ~--port~ wymusza. /Test:/ ~--simulate~ → „mock"; bez sprzętu i bez ~--port~
   → czytelny błąd „no iDraw found". /Auto:/ U: funkcja filtrująca listę portów po VID/PID
   (na ustawionej liście atrap ~SerialPortInfo~).

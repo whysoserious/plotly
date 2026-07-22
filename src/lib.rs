@@ -25,8 +25,25 @@ pub fn run() -> io::Result<()> {
     if args.panic_test {
         panic!("synthetic panic to exercise the logging panic hook");
     }
-    if args.simulate {
-        probe_mock();
+
+    // Resolve the plotter before entering the alternate screen, so a "no iDraw
+    // found" message lands on a normal terminal instead of being wiped by it.
+    let port = match plotter::serial::resolve_port(args.simulate, args.port.as_deref()) {
+        Ok(port) => port,
+        Err(err) => {
+            tracing::error!(%err, "no plotter to connect to");
+            eprintln!("plotly: {err}");
+            return Err(io::Error::new(io::ErrorKind::NotFound, err));
+        }
+    };
+    match &port {
+        plotter::serial::PortChoice::Mock => {
+            tracing::info!("using the mock plotter (--simulate)");
+            probe_mock();
+        }
+        plotter::serial::PortChoice::Serial(path) => {
+            tracing::info!(%path, baud = args.baud, "plotter port selected");
+        }
     }
 
     run_tui(log)

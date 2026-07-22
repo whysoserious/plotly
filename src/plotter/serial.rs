@@ -9,7 +9,8 @@ use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
 use serialport::{
-    ClearBuffer, DataBits, FlowControl, Parity, SerialPort, SerialPortType, StopBits,
+    ClearBuffer, DataBits, FlowControl, Parity, SerialPort, SerialPortInfo, SerialPortType,
+    StopBits,
 };
 
 use super::transport::Transport;
@@ -141,26 +142,151 @@ fn take_line(buf: &mut Vec<u8>) -> Option<String> {
 
 /// Port names of connected iDraw boards, matched on USB VID:PID.
 pub fn find_idraw_ports() -> Vec<String> {
-    let ports = match serialport::available_ports() {
-        Ok(ports) => ports,
+    match serialport::available_ports() {
+        Ok(ports) => filter_idraw_ports(&ports),
         Err(err) => {
             tracing::warn!(%err, "port enumeration failed");
-            return Vec::new();
+            Vec::new()
         }
-    };
+    }
+}
+
+/// Names of the ports in `ports` that are iDraw boards.
+///
+/// Matching is by USB VID:PID only, never by port name: the board enumerates
+/// as CDC-ACM (`/dev/ttyACM0`) on some kernels and as a plain CH340
+/// (`/dev/ttyUSB0`) on others (DESIGN.org §2.1).
+pub fn filter_idraw_ports(ports: &[SerialPortInfo]) -> Vec<String> {
     ports
-        .into_iter()
+        .iter()
         .filter(|p| match &p.port_type {
             SerialPortType::UsbPort(usb) => usb.vid == IDRAW_VID && IDRAW_PIDS.contains(&usb.pid),
             _ => false,
         })
-        .map(|p| p.port_name)
+        .map(|p| p.port_name.clone())
         .collect()
+}
+
+/// Where the plotter I/O should go for this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortChoice {
+    /// `--simulate`: the in-process [`super::mock::MockTransport`].
+    Mock,
+    /// A serial port path, either forced with `--port` or auto-detected.
+    Serial(String),
+}
+
+/// Why no plotter could be selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortError {
+    /// Nothing matching the iDraw VID:PID is plugged in.
+    NotFound,
+}
+
+impl std::fmt::Display for PortError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(
+                f,
+                "no iDraw found (USB {IDRAW_VID:04X}:{:04X}/{:04X}). \
+                 Plug it in and switch it on, pass --port <PATH>, or run with --simulate.",
+                IDRAW_PIDS[0], IDRAW_PIDS[1]
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PortError {}
+
+/// Pick the plotter for this run: mock, an explicit `--port`, or auto-detect.
+///
+/// `--simulate` wins over `--port` so a forced path cannot accidentally open
+/// real hardware during a dry run.
+pub fn resolve_port(simulate: bool, requested: Option<&str>) -> Result<PortChoice, PortError> {
+    if simulate {
+        return Ok(PortChoice::Mock);
+    }
+    if let Some(path) = requested {
+        return Ok(PortChoice::Serial(path.to_owned()));
+    }
+    let found = find_idraw_ports();
+    if found.len() > 1 {
+        tracing::warn!(?found, "several iDraw ports found; using the first");
+    }
+    found
+        .into_iter()
+        .next()
+        .map(PortChoice::Serial)
+        .ok_or(PortError::NotFound)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serialport::UsbPortInfo;
+
+    /// A USB serial port as `available_ports()` would report it.
+    fn usb_port(name: &str, vid: u16, pid: u16) -> SerialPortInfo {
+        SerialPortInfo {
+            port_name: name.to_owned(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid,
+                pid,
+                serial_number: None,
+                manufacturer: Some("QinHeng Electronics".to_owned()),
+                product: Some("USB CDC-Serial".to_owned()),
+            }),
+        }
+    }
+
+    #[test]
+    fn filter_keeps_both_idraw_pids_whatever_the_port_is_called() {
+        let ports = [
+            usb_port("/dev/ttyACM0", IDRAW_VID, 0x8040),
+            usb_port("/dev/ttyUSB0", IDRAW_VID, 0x7523),
+        ];
+        assert_eq!(
+            filter_idraw_ports(&ports),
+            vec!["/dev/ttyACM0".to_owned(), "/dev/ttyUSB0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn filter_rejects_other_usb_devices_and_non_usb_ports() {
+        let ports = [
+            usb_port("/dev/ttyUSB1", 0x0403, 0x6001),    // FTDI
+            usb_port("/dev/ttyACM1", IDRAW_VID, 0x5523), // same vendor, wrong product
+            SerialPortInfo {
+                port_name: "/dev/ttyS0".to_owned(),
+                port_type: SerialPortType::PciPort,
+            },
+        ];
+        assert!(filter_idraw_ports(&ports).is_empty());
+    }
+
+    #[test]
+    fn simulate_wins_over_an_explicit_port() {
+        assert_eq!(
+            resolve_port(true, Some("/dev/ttyACM0")),
+            Ok(PortChoice::Mock)
+        );
+    }
+
+    #[test]
+    fn explicit_port_is_used_verbatim_without_probing() {
+        assert_eq!(
+            resolve_port(false, Some("/dev/ttyS9")),
+            Ok(PortChoice::Serial("/dev/ttyS9".to_owned()))
+        );
+    }
+
+    #[test]
+    fn not_found_explains_all_three_ways_out() {
+        let message = PortError::NotFound.to_string();
+        assert!(message.contains("1A86:7523/8040"), "{message}");
+        assert!(message.contains("--port"), "{message}");
+        assert!(message.contains("--simulate"), "{message}");
+    }
 
     #[test]
     fn take_line_splits_on_cr_and_keeps_remainder() {
