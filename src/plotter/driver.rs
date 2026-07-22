@@ -17,6 +17,12 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// (spike 0.7, §15.1), but a full-length seek from the far corner is slower.
 const HOMING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Grbl realtime soft reset (Ctrl-X).
+const SOFT_RESET: u8 = 0x18;
+
+/// How long to wait out the reboot banner after a soft reset (§15.2).
+const RESET_SETTLE: Duration = Duration::from_millis(1500);
+
 /// Where the pen is. Tracked here because the firmware cannot tell us: `$QP`
 /// answers `1` regardless of the Z axis (spike 0.7, §15.3), so the host owns
 /// this state — as it does the position.
@@ -168,6 +174,60 @@ impl Driver {
         self.command("$SLP")?;
         tracing::warn!("motors disabled; position is unknown until the next homing");
         Ok(())
+    }
+
+    /// Send an arbitrary line typed by the user and collect the replies.
+    ///
+    /// Unlike [`Driver::command`], a refusal is *returned as text* rather than
+    /// as an error: in a console the `error:20` line is the answer the user
+    /// asked for, not a failure of the program.
+    pub fn send_raw(&mut self, line: &str) -> Result<Vec<String>, DriverError> {
+        self.connection.transport.send_line(line)?;
+        let deadline = Instant::now() + REPLY_TIMEOUT;
+        let mut replies = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.connection.transport.read_line_for(left)? {
+                Some(reply) => {
+                    let done = reply == "ok" || reply.starts_with("error:");
+                    replies.push(reply);
+                    if done {
+                        return Ok(replies);
+                    }
+                }
+                None => return Ok(replies),
+            }
+        }
+    }
+
+    /// Abort: lift the pen, then soft-reset the board (DESIGN.org §9).
+    ///
+    /// Pen up goes *first* deliberately — after `0x18` the firmware reboots and
+    /// would not run it. Interrupting a running job comes with the worker in
+    /// step 2.7; right now there is no job to interrupt, only motion in flight.
+    pub fn emergency_stop(&mut self) -> Result<(), DriverError> {
+        tracing::warn!("emergency stop");
+        if let Err(err) = self.pen_up() {
+            tracing::warn!(%err, "pen up before the reset failed; resetting anyway");
+        }
+        self.connection.transport.write_realtime(SOFT_RESET)?;
+        self.settle_after_reset();
+        Ok(())
+    }
+
+    /// Swallow the reboot banner so the next command is not sent into the boot
+    /// (the trap from §15.2).
+    fn settle_after_reset(&mut self) {
+        let deadline = Instant::now() + RESET_SETTLE;
+        while let Ok(Some(line)) = self
+            .connection
+            .transport
+            .read_line_for(deadline.saturating_duration_since(Instant::now()))
+        {
+            tracing::debug!(%line, "after soft reset");
+        }
+        // The board comes up with default modal state; ours must match it.
+        self.pen = Pen::Up;
     }
 
     /// Move the pen to `target`, then restore the XY feed rate.

@@ -7,7 +7,7 @@ use crossterm::event::{self, Event, KeyEvent};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
-use crate::keys::{action_for, Action};
+use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plotter::driver::{Driver, DriverError};
 use crate::ui;
@@ -19,6 +19,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Top-level TUI application state.
 pub struct App {
     driver: Driver,
+    /// Raw G-code console (step 1.5): `Some` while it is open, holding the
+    /// line being typed. Its presence is what switches the key map to text.
+    console: Option<String>,
+    /// Whether the key overview is covering the screen.
+    help: bool,
     /// What the machine is doing while a blocking command runs, for the status
     /// bar. Goes away with the job worker and its channels (step 2.4).
     busy: Option<&'static str>,
@@ -31,6 +36,8 @@ impl App {
     pub fn new(driver: Driver, log: LogRing) -> Self {
         Self {
             driver,
+            console: None,
+            help: false,
             busy: None,
             last_log_len: log.len(),
             log,
@@ -76,9 +83,15 @@ impl App {
         key: KeyEvent,
         terminal: &mut Terminal<B>,
     ) -> io::Result<bool> {
-        let Some(action) = action_for(&key) else {
+        let Some(action) = action_for(self.mode(), &key) else {
             return Ok(false);
         };
+        // While the overview is up, any key dismisses it and does nothing else
+        // — except quitting, which people expect to work from anywhere.
+        if self.help && action != Action::Quit {
+            self.help = false;
+            return Ok(true);
+        }
         match action {
             Action::Quit => {
                 tracing::info!("quit requested");
@@ -92,7 +105,67 @@ impl App {
             Action::DisableMotors => {
                 self.run_command(terminal, "disabling motors", Driver::disable_motors)
             }
+            Action::EmergencyStop => {
+                self.run_command(terminal, "emergency stop", Driver::emergency_stop)
+            }
+            Action::OpenConsole => {
+                tracing::info!("raw G-code console open");
+                self.console = Some(String::new());
+                Ok(true)
+            }
+            Action::CloseConsole => {
+                tracing::info!("raw G-code console closed");
+                self.console = None;
+                Ok(true)
+            }
+            Action::Input(c) => {
+                if let Some(line) = &mut self.console {
+                    line.push(c);
+                }
+                Ok(true)
+            }
+            Action::Backspace => {
+                if let Some(line) = &mut self.console {
+                    line.pop();
+                }
+                Ok(true)
+            }
+            Action::Submit => self.submit_console(terminal),
+            Action::ToggleHelp => {
+                self.help = !self.help;
+                Ok(true)
+            }
         }
+    }
+
+    /// Which key map applies right now — the console makes input textual.
+    fn mode(&self) -> Mode {
+        match self.console {
+            Some(_) => Mode::Console,
+            None => Mode::Navigation,
+        }
+    }
+
+    /// Send the typed line and keep the console open for the next one.
+    fn submit_console<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<bool> {
+        let Some(line) = self.console.as_mut().map(std::mem::take) else {
+            return Ok(false);
+        };
+        let line = line.trim().to_owned();
+        if line.is_empty() {
+            return Ok(true);
+        }
+
+        self.busy = Some("sending");
+        self.draw(terminal)?;
+        match self.driver.send_raw(&line) {
+            // The replies are already in the log panel via the TRACE wire log;
+            // this line names the command they belong to.
+            Ok(replies) => tracing::info!(%line, reply = %replies.join(" | "), "console"),
+            Err(err) => tracing::error!(%err, %line, "console command failed"),
+        }
+        self.busy = None;
+        Ok(true)
     }
 
     /// Show what is happening, then run a blocking driver command.
@@ -127,6 +200,15 @@ impl App {
 
     pub fn driver(&self) -> &Driver {
         &self.driver
+    }
+
+    /// The line being typed, when the console is open.
+    pub fn console(&self) -> Option<&str> {
+        self.console.as_deref()
+    }
+
+    pub fn help_visible(&self) -> bool {
+        self.help
     }
 
     pub fn busy(&self) -> Option<&'static str> {

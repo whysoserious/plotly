@@ -325,7 +325,11 @@ mod tests {
     #[test]
     fn ring_writer_captures_formatted_line() {
         let ring = LogRing::new();
-        let subscriber = build_subscriber(LevelFilter::INFO, ring.clone());
+        // TRACE, not INFO, even though the event below is INFO: `tracing`'s
+        // max-level hint is process-wide, so an INFO subscriber here would
+        // silently filter out the TRACE events other tests assert on when the
+        // suite runs them in parallel.
+        let subscriber = build_subscriber(LevelFilter::TRACE, ring.clone());
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(target: "plotly::selftest", answer = 42, "hello world");
         });

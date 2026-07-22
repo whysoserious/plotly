@@ -636,7 +636,7 @@ od razu*. Zamiast tego:
   emituje *dokładnie* dwie linie w właściwej kolejności (Z, potem feed) — asercja na bufor mocka.
 - [X] *1.4 ✱ Homing ~$H~ + ~$SLP~.* Klawisz ~h~ → ~$H~; disable silników. /Test:/ ✱ karetka
   bazuje na krańcówkach; po ~$SLP~ silniki luźne. /Auto:/ I: ~h~ wysyła ~$H\r~.
-- [ ] *1.5 Konsola surowego G-code (~c~).* Modalne pole tekstowe (input wyłącza skróty
+- [X] *1.5 Konsola surowego G-code (~c~).* Modalne pole tekstowe (input wyłącza skróty
   jednoklawiszowe — sekcja 8!); wyślij dowolną linię, pokaż odpowiedź. /Test:/ wpisz ~M3 S100~
   — ~S~ NIE wywołuje STOP; w mocku widać ~->~/~<-~. /Auto:/ U: router wejścia — w trybie tekst
   ~S~ trafia do bufora, w trybie nawigacji ~S~ = ~Command::EStop~.

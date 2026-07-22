@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use plotly::keys::{action_for, Action};
+use plotly::keys::{action_for, Action, Mode};
 use plotly::plotter::driver::{Driver, Pen};
 use plotly::plotter::mock::MockTransport;
 use plotly::plotter::Connection;
@@ -22,7 +22,10 @@ fn driver_with_log() -> (Driver, std::sync::Arc<std::sync::Mutex<Vec<String>>>) 
 #[test]
 fn h_is_bound_to_homing_and_sends_exactly_that() {
     assert_eq!(
-        action_for(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        action_for(
+            Mode::Navigation,
+            &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)
+        ),
         Some(Action::Home)
     );
 
@@ -47,7 +50,10 @@ fn homing_leaves_the_pen_counted_as_up() {
 #[test]
 fn d_releases_the_motors_with_a_single_command() {
     assert_eq!(
-        action_for(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+        action_for(
+            Mode::Navigation,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)
+        ),
         Some(Action::DisableMotors)
     );
 
