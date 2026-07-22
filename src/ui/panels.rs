@@ -8,10 +8,12 @@ use crate::app::App;
 
 /// Connection / job status. Job state follows once the worker exists (2.4).
 pub fn status(frame: &mut Frame, area: Rect, app: &App) {
-    let conn = app.connection();
+    let driver = app.driver();
     let text = format!(
-        "Connected {} on {} — no job loaded",
-        conn.version, conn.port
+        "Connected {} on {} — pen {} ([ up, ] down, space toggle)",
+        driver.version(),
+        driver.port(),
+        driver.pen()
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));
     frame.render_widget(widget, area);

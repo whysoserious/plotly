@@ -626,9 +626,12 @@ od razu*. Zamiast tego:
   ~reset_input_buffer~→~v\r~; parsuj ~"DrawCore V…"~ → ~Event::Connected{version}~ (2.1).
   /Test:/ ✱ realny iDraw: status „Connected DrawCore V2.xx" w TUI, pełen handshake w TRACE.
   /Auto:/ I: ~MockTransport~ przechodzi handshake i zwraca wersję; zły prefiks → błąd połączenia.
-- [ ] *1.3 ✱ Pen up/down + toggle.* ~driver.rs~: ~pen_up~/~pen_down~ (~G1 G90 Z..F..~ +
-  doprecyzowujące ~G1 F<feed_xy>~ — uwaga z 2.2!), ~$TP~ toggle; klawisze ~[~/~]~/~Space~.
-  /Test:/ ✱ pióro fizycznie idzie w dół/górę; ~$QP~ potwierdza stan. /Auto:/ I: ~pen_down~
+- [X] *1.3 ✱ Pen up/down + toggle.* ~driver.rs~: ~pen_up~/~pen_down~ (~G1 G90 Z..F..~ +
+  doprecyzowujące ~G1 F<feed_xy>~ — uwaga z 2.2!); klawisze ~[~/~]~/~Space~.
+  /Zmiana po spike'u:/ toggle robimy *jawnym ruchem Z do przeciwnego stanu*, a *nie* ~$TP~ —
+  ~$TP~ przełącza względem stanu firmware'u, którego nie umiemy odczytać (~$QP~ zwraca stale
+  ~1~, 15.3), więc po pierwszej zgubionej komendzie rozjechałby się z naszym. *Stan pióra
+  trzyma host* (jak pozycję). /Test:/ ✱ pióro fizycznie idzie w dół/górę. /Auto:/ I: ~pen_down~
   emituje *dokładnie* dwie linie w właściwej kolejności (Z, potem feed) — asercja na bufor mocka.
 - [ ] *1.4 ✱ Homing ~$H~ + ~$SLP~.* Klawisz ~h~ → ~$H~; disable silników. /Test:/ ✱ karetka
   bazuje na krańcówkach; po ~$SLP~ silniki luźne. /Auto:/ I: ~h~ wysyła ~$H\r~.

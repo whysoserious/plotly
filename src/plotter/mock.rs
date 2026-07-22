@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::transport::Transport;
@@ -18,8 +19,10 @@ pub struct MockTransport {
     /// When set, the board answers nothing at all (a dead or wrong-baud link).
     mute: bool,
     responses: VecDeque<String>,
-    sent: Vec<String>,
-    realtime: Vec<u8>,
+    /// Shared so a test can still watch the traffic after the transport has
+    /// been handed to a driver (see [`MockTransport::sent_handle`]).
+    sent: Arc<Mutex<Vec<String>>>,
+    realtime: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Default for MockTransport {
@@ -40,8 +43,8 @@ impl MockTransport {
             version: version.to_owned(),
             mute: false,
             responses: VecDeque::new(),
-            sent: Vec::new(),
-            realtime: Vec::new(),
+            sent: Arc::new(Mutex::new(Vec::new())),
+            realtime: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -73,20 +76,28 @@ impl MockTransport {
     }
 
     /// Lines sent so far (for assertions / inspection).
-    pub fn sent(&self) -> &[String] {
-        &self.sent
+    pub fn sent(&self) -> Vec<String> {
+        self.sent.lock().expect("mock log poisoned").clone()
+    }
+
+    /// Handle to the sent-line log that outlives moving the transport.
+    pub fn sent_handle(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.sent)
     }
 
     /// Realtime bytes written so far (for assertions / inspection).
-    pub fn realtime(&self) -> &[u8] {
-        &self.realtime
+    pub fn realtime(&self) -> Vec<u8> {
+        self.realtime.lock().expect("mock log poisoned").clone()
     }
 }
 
 impl Transport for MockTransport {
     fn send_line(&mut self, line: &str) -> io::Result<()> {
         tracing::trace!(target: "plotly::transport", "-> {line:?}");
-        self.sent.push(line.to_owned());
+        self.sent
+            .lock()
+            .expect("mock log poisoned")
+            .push(line.to_owned());
         if !self.mute {
             self.responses.extend(self.auto_response(line));
         }
@@ -104,7 +115,7 @@ impl Transport for MockTransport {
 
     fn write_realtime(&mut self, byte: u8) -> io::Result<()> {
         tracing::trace!(target: "plotly::transport", "-> realtime {byte:#04x}");
-        self.realtime.push(byte);
+        self.realtime.lock().expect("mock log poisoned").push(byte);
         Ok(())
     }
 }
@@ -123,7 +134,7 @@ mod tests {
             t.read_line_for(NO_WAIT).unwrap().as_deref(),
             Some(MOCK_VERSION)
         );
-        assert_eq!(t.sent(), &["v".to_owned()]);
+        assert_eq!(t.sent(), vec!["v".to_owned()]);
     }
 
     #[test]
@@ -159,7 +170,7 @@ mod tests {
         let mut t = MockTransport::new();
         t.write_realtime(b'?').unwrap();
         t.write_realtime(0x18).unwrap();
-        assert_eq!(t.realtime(), &[b'?', 0x18]);
+        assert_eq!(t.realtime(), vec![b'?', 0x18]);
     }
 
     #[test]

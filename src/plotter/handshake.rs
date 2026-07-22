@@ -141,7 +141,7 @@ mod tests {
     fn handshake_sends_button_query_before_identity() {
         let mut t = MockTransport::new();
         connect(&mut t).unwrap();
-        assert_eq!(t.sent(), &["$B".to_owned(), "v".to_owned()]);
+        assert_eq!(t.sent(), vec!["$B".to_owned(), "v".to_owned()]);
     }
 
     #[test]

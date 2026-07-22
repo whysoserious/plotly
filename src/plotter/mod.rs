@@ -2,6 +2,7 @@
 //! connection handshake. The driver and worker arrive in later steps.
 //! DESIGN.org §4/§12.
 
+pub mod driver;
 pub mod handshake;
 pub mod mock;
 pub mod serial;

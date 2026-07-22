@@ -39,7 +39,7 @@ pub fn run() -> io::Result<()> {
     let connection =
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
-    run_tui(connection, log)
+    run_tui(plotter::driver::Driver::new(connection), log)
 }
 
 /// Report a startup failure on stderr and in the log, as an `io::Error`.
@@ -50,11 +50,11 @@ fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> 
 }
 
 /// Enter the terminal, wire restore-on-panic/-signal, and run the TUI app.
-fn run_tui(connection: plotter::Connection, log: logging::LogRing) -> io::Result<()> {
+fn run_tui(driver: plotter::driver::Driver, log: logging::LogRing) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
     tui::install_panic_restore();
     tui::install_signal_restore();
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(connection, log).run(&mut terminal)
+    app::App::new(driver, log).run(&mut terminal)
 }
