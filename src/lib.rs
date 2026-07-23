@@ -54,8 +54,8 @@ pub fn run() -> io::Result<()> {
     run_tui(plotter::driver::Driver::new(connection), log)
 }
 
-/// Log the loaded drawing and where it lands after fitting to the field. The
-/// resulting plan is built in step 2.3; this is the DEBUG bbox check of §2.2.
+/// Log the loaded drawing, where it lands after fitting, and the built plan.
+/// Executing the plan is step 2.4; this covers the DEBUG checks of §2.2/§2.3.
 fn log_drawing(path: &std::path::Path, svg: &plan::svg::Svg) {
     tracing::info!(
         file = %path.display(),
@@ -73,6 +73,16 @@ fn log_drawing(path: &std::path::Path, svg: &plan::svg::Svg) {
             x1 = max.x,
             y1 = max.y,
             "placed bbox (mm) after fit to field"
+        );
+
+        let settings = plan::PlanSettings::default();
+        let job = plan::Plan::build(&svg.polylines, &placement, &settings);
+        tracing::debug!(
+            ops = job.ops.len(),
+            strokes = job.stroke_count(),
+            moves = job.move_count(),
+            cap_mm = settings.max_segment_mm,
+            "plan built"
         );
     }
 }

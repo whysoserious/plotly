@@ -660,7 +660,7 @@ od razu*. Zamiast tego:
   ~map_vector~. /Test:/ DEBUG pokazuje bbox po fit. /Auto:/ U: round-trip ~logical→wire→logical~
   = identyczność; ~map_vector~ = liniowa część ~map_point~ (spójność ~L~); punkt poza polem
   wykrywany; znany punkt → oczekiwane wire-XY (oracle ze spike'u).
-- [ ] *2.3 Budowa ~Plan~ (~Vec<Op>~) + subdivision.* ~plan/mod.rs~: ~PenUp/PenDown/MoveTo/
+- [X] *2.3 Budowa ~Plan~ (~Vec<Op>~) + subdivision.* ~plan/mod.rs~: ~PenUp/PenDown/MoveTo/
   Dwell/SetFeed~; dziel długie segmenty na krótkie op (cap długości/czasu — sekcja 6). /Test:/
   DEBUG: liczba op, max długość segmentu ≤ cap. /Auto:/ U: segment 100 mm przy cap 5 mm → ≥20 op;
   granice op zachowują geometrię (suma = oryginał).
