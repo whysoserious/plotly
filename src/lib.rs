@@ -33,12 +33,7 @@ pub fn run() -> io::Result<()> {
     // reported on a normal terminal. Building it into a plan is step 2.3.
     if let Some(path) = &args.svg_file {
         match plan::svg::load(path) {
-            Ok(svg) => tracing::info!(
-                file = %path.display(),
-                paths = svg.path_count(),
-                points = svg.point_count(),
-                "SVG loaded"
-            ),
+            Ok(svg) => log_drawing(path, &svg),
             Err(err) => return Err(fail("cannot load the SVG", err)),
         }
     }
@@ -58,6 +53,32 @@ pub fn run() -> io::Result<()> {
 
     run_tui(plotter::driver::Driver::new(connection), log)
 }
+
+/// Log the loaded drawing and where it lands after fitting to the field. The
+/// resulting plan is built in step 2.3; this is the DEBUG bbox check of §2.2.
+fn log_drawing(path: &std::path::Path, svg: &plan::svg::Svg) {
+    tracing::info!(
+        file = %path.display(),
+        paths = svg.path_count(),
+        points = svg.point_count(),
+        "SVG loaded"
+    );
+    if let Some(bounds) = svg.bounds_mm() {
+        let field = geometry::Field::idraw_a0();
+        let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
+        let (min, max) = placement.place_bounds(bounds);
+        tracing::debug!(
+            x0 = min.x,
+            y0 = min.y,
+            x1 = max.x,
+            y1 = max.y,
+            "placed bbox (mm) after fit to field"
+        );
+    }
+}
+
+/// Default margin left around the drawing when fitting to the field (mm).
+const DEFAULT_MARGIN_MM: f64 = 5.0;
 
 /// Report a startup failure on stderr and in the log, as an `io::Error`.
 fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> io::Error {

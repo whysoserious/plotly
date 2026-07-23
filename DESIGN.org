@@ -653,7 +653,7 @@ od razu*. Zamiast tego:
   rozdzielczość style/transform/~use~. /Test:/ ~--simulate logo.svg~ + ~--log-level debug~ →
   „N ścieżek, M punktów". /Auto:/ U: znany SVG (kwadrat 10×10 mm) → 4 wierzchołki w mm; łuk →
   polilinia w tolerancji. I: plik testowy w ~tests/fixtures/~.
-- [ ] *2.2 Geometria: fit/pozycja + ~map_point~ na bazie ~Transform~ z 1.6.* ~geometry.rs~:
+- [X] *2.2 Geometria: fit/pozycja + ~map_point~ na bazie ~Transform~ z 1.6.* ~geometry.rs~:
   mm/inch, fit do pola profilu, origin; *rozszerz ~Transform~ z 1.6* o ~map_point(x,y)~ (punkt
   absolutny → drut: ta sama część liniowa ~L~ + translacja ~t~ = origin po ~$H~ + offset fit,
   2.3/2.4). Nie budujesz transformu od zera — dokładasz warstwę punktową na istniejące
