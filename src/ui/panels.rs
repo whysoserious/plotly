@@ -28,11 +28,6 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(widget, area);
 }
 
-/// Toolpath canvas (braille rendering arrives in step 2.5).
-pub fn canvas(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Block::bordered().title(" Canvas "), area);
-}
-
 /// Key overview, drawn over everything else (step 1.5). Rows come straight
 /// from the key map, so the two cannot disagree.
 pub fn help(frame: &mut Frame, area: Rect) {

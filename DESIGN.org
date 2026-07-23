@@ -668,7 +668,7 @@ od razu*. Zamiast tego:
   wykonuje ~Plan~ op-po-op, między op ~try_recv~. /Test:/ ~--simulate~ rysuje cały plan, TUI
   pokazuje „done". /Auto:/ I: worker na ~MockTransport~ wysyła N op w kolejności, emituje
   ~SegmentDone~×N i ~Progress~ rosnący; każda ~MoveTo~ = poprawna linia G-code.
-- [ ] *2.5 Podgląd braille + pozycja.* ~ui/canvas.rs~: toolpath na canvasie braille'owym +
+- [X] *2.5 Podgląd braille + pozycja.* ~ui/canvas.rs~: toolpath na canvasie braille'owym +
   kursor pozycji (z planu; ~?~ tylko jeśli spike ✔). /Test:/ ~--simulate~: rysunek zgadza się
   z SVG, kursor wędruje. /Auto:/ U: mapowanie mm→komórki braille (skala/clamp do canvasu).
 - [ ] *2.6 ✱ Pierwszy realny wydruk.* Pełny pipeline na sprzęcie. /Test:/ ✱ kwadrat/logo

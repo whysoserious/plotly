@@ -1,5 +1,6 @@
 //! TUI rendering: three-panel layout (status / canvas / log). DESIGN.org §4 / 0.5.
 
+mod canvas;
 mod panels;
 
 use ratatui::layout::{Constraint, Layout};
@@ -20,7 +21,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .split(frame.area());
 
     panels::status(frame, areas[0], app);
-    panels::canvas(frame, areas[1]);
+    canvas::canvas(frame, areas[1], app);
     if let Some(line) = app.console() {
         panels::console(frame, areas[2], line);
     }

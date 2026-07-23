@@ -266,6 +266,11 @@ impl App {
         &self.machine
     }
 
+    /// The loaded plan, if any, for the toolpath preview.
+    pub fn plan(&self) -> Option<&Plan> {
+        self.plan.as_ref()
+    }
+
     pub fn activity(&self) -> &Activity {
         &self.activity
     }
