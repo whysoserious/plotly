@@ -35,6 +35,8 @@ pub enum Action {
     /// Grow or shrink the jog step (0.1 / 1 / 5 / 10 mm).
     StepBigger,
     StepSmaller,
+    /// Start drawing the loaded plan.
+    StartPlot,
     /// Abort: pen up, then soft reset. Full plan abort lands in step 2.7.
     EmergencyStop,
     OpenConsole,
@@ -76,6 +78,12 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         probe: Some(KeyCode::Char('+')),
         action: Action::StepBigger,
         description: "jog step: 0.1 / 1 / 5 / 10 mm",
+    },
+    Binding {
+        keys: "enter",
+        probe: Some(KeyCode::Enter),
+        action: Action::StartPlot,
+        description: "draw the loaded SVG",
     },
     Binding {
         keys: "[  /  PgUp",
@@ -190,6 +198,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::Jog { dx: 0, dy: 1 }),
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::StepBigger),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
+        KeyCode::Enter => Some(Action::StartPlot),
         KeyCode::Char('h') => Some(Action::Home),
         KeyCode::Char('d') => Some(Action::DisableMotors),
         KeyCode::Char('S') => Some(Action::EmergencyStop),
@@ -319,6 +328,7 @@ mod tests {
         for action in [
             Action::Jog { dx: 1, dy: 0 },
             Action::StepBigger,
+            Action::StartPlot,
             Action::PenUp,
             Action::PenDown,
             Action::PenToggle,

@@ -30,13 +30,14 @@ pub fn run() -> io::Result<()> {
     }
 
     // Load the drawing early (before touching hardware), so a broken SVG is
-    // reported on a normal terminal. Building it into a plan is step 2.3.
-    if let Some(path) = &args.svg_file {
-        match plan::svg::load(path) {
-            Ok(svg) => log_drawing(path, &svg),
+    // reported on a normal terminal, and build the plan to draw on `Enter`.
+    let plan = match &args.svg_file {
+        Some(path) => match plan::svg::load(path) {
+            Ok(svg) => Some(prepare_plan(path, &svg)),
             Err(err) => return Err(fail("cannot load the SVG", err)),
-        }
-    }
+        },
+        None => None,
+    };
 
     // Resolve and greet the plotter before entering the alternate screen, so
     // failures land on a normal terminal instead of being wiped by the TUI.
@@ -51,40 +52,45 @@ pub fn run() -> io::Result<()> {
     let connection =
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
-    run_tui(plotter::driver::Driver::new(connection), log)
+    run_tui(plotter::driver::Driver::new(connection), plan, log)
 }
 
-/// Log the loaded drawing, where it lands after fitting, and the built plan.
-/// Executing the plan is step 2.4; this covers the DEBUG checks of §2.2/§2.3.
-fn log_drawing(path: &std::path::Path, svg: &plan::svg::Svg) {
+/// Log the loaded drawing, fit it to the field, and build the plan to draw.
+/// Covers the DEBUG checks of §2.2/§2.3; execution is the worker (step 2.4).
+fn prepare_plan(path: &std::path::Path, svg: &plan::svg::Svg) -> plan::Plan {
     tracing::info!(
         file = %path.display(),
         paths = svg.path_count(),
         points = svg.point_count(),
         "SVG loaded"
     );
-    if let Some(bounds) = svg.bounds_mm() {
-        let field = geometry::Field::idraw_a0();
-        let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
-        let (min, max) = placement.place_bounds(bounds);
-        tracing::debug!(
-            x0 = min.x,
-            y0 = min.y,
-            x1 = max.x,
-            y1 = max.y,
-            "placed bbox (mm) after fit to field"
-        );
+    let field = geometry::Field::idraw_a0();
+    let placement = match svg.bounds_mm() {
+        Some(bounds) => {
+            let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
+            let (min, max) = placement.place_bounds(bounds);
+            tracing::debug!(
+                x0 = min.x,
+                y0 = min.y,
+                x1 = max.x,
+                y1 = max.y,
+                "placed bbox (mm) after fit to field"
+            );
+            placement
+        }
+        None => geometry::Placement::identity(),
+    };
 
-        let settings = plan::PlanSettings::default();
-        let job = plan::Plan::build(&svg.polylines, &placement, &settings);
-        tracing::debug!(
-            ops = job.ops.len(),
-            strokes = job.stroke_count(),
-            moves = job.move_count(),
-            cap_mm = settings.max_segment_mm,
-            "plan built"
-        );
-    }
+    let settings = plan::PlanSettings::default();
+    let job = plan::Plan::build(&svg.polylines, &placement, &settings);
+    tracing::debug!(
+        ops = job.ops.len(),
+        strokes = job.stroke_count(),
+        moves = job.move_count(),
+        cap_mm = settings.max_segment_mm,
+        "plan built"
+    );
+    job
 }
 
 /// Default margin left around the drawing when fitting to the field (mm).
@@ -97,12 +103,26 @@ fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> 
     io::Error::other(err)
 }
 
-/// Enter the terminal, wire restore-on-panic/-signal, and run the TUI app.
-fn run_tui(driver: plotter::driver::Driver, log: logging::LogRing) -> io::Result<()> {
+/// Enter the terminal, wire restore-on-panic/-signal, spawn the worker, and run
+/// the TUI app against it.
+fn run_tui(
+    driver: plotter::driver::Driver,
+    plan: Option<plan::Plan>,
+    log: logging::LogRing,
+) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
     tui::install_panic_restore();
     tui::install_signal_restore();
 
+    // Snapshot the identity before the driver moves onto the worker thread.
+    let machine = plotter::worker::MachineState {
+        version: driver.version().to_owned(),
+        port: driver.port().to_owned(),
+        pen: driver.pen(),
+        position: driver.position(),
+    };
+    let worker = plotter::worker::Worker::spawn(driver);
+
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(driver, log).run(&mut terminal)
+    app::App::new(worker, machine, plan, log).run(&mut terminal)
 }

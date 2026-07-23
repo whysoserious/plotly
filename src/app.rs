@@ -1,55 +1,73 @@
-//! Application state and the event/render loop. DESIGN.org §4 / step 0.5.
+//! Application state and the event/render loop. DESIGN.org §4.
+//!
+//! The app owns no transport: the [`Worker`] thread does. The app sends
+//! [`Command`]s and folds [`Event`]s into a local mirror of the machine state,
+//! so the UI stays responsive while the board is busy.
 
 use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event as TermEvent, KeyEvent, KeyEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
 use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
-use crate::plotter::driver::{Driver, DriverError};
+use crate::plan::Plan;
+use crate::plotter::worker::{Command, Event, MachineState, Worker};
 use crate::ui;
 
-/// Idle poll timeout: bounds how often we wake to pick up new log lines while
-/// keeping idle CPU negligible (we only redraw when something actually changed).
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Idle poll timeout: bounds how often we wake to pick up worker events and new
+/// log lines while keeping idle CPU negligible (we redraw only on a change).
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Jog step sizes cycled by `+`/`-`, in millimetres (DESIGN.org §8).
 const JOG_STEPS_MM: [f64; 4] = [0.1, 1.0, 5.0, 10.0];
 /// Index into [`JOG_STEPS_MM`] the app starts on (1 mm).
 const DEFAULT_STEP_INDEX: usize = 1;
 
+/// What the machine is doing, for the status bar. Derived from worker events.
+#[derive(Debug, Clone)]
+pub enum Activity {
+    Idle,
+    Busy(String),
+    Drawing { done: usize, total: usize },
+}
+
 /// Top-level TUI application state.
 pub struct App {
-    driver: Driver,
-    /// Raw G-code console (step 1.5): `Some` while it is open, holding the
-    /// line being typed. Its presence is what switches the key map to text.
+    worker: Worker,
+    /// Last machine snapshot from the worker (pen, position, identity).
+    machine: MachineState,
+    activity: Activity,
+    /// A short note shown after a plan ends ("done", "stopped", …).
+    note: Option<String>,
+    /// The plan built from the loaded SVG, if any; `Enter` draws it.
+    plan: Option<Plan>,
+    /// Raw G-code console (step 1.5): `Some` while open, holding the typed line.
     console: Option<String>,
     /// Whether the key overview is covering the screen.
     help: bool,
-    /// What the machine is doing while a blocking command runs, for the status
-    /// bar. Goes away with the job worker and its channels (step 2.4).
-    busy: Option<&'static str>,
     /// Current jog step, as an index into [`JOG_STEPS_MM`].
     step_index: usize,
-    /// Events read ahead of the loop (during jog coalescing) and not yet
-    /// handled. Drained before the terminal is polled again.
-    pending_events: VecDeque<Event>,
+    /// Terminal events read ahead during jog coalescing, not yet handled.
+    pending_events: VecDeque<TermEvent>,
     log: LogRing,
     last_log_len: usize,
     should_quit: bool,
 }
 
 impl App {
-    pub fn new(driver: Driver, log: LogRing) -> Self {
+    pub fn new(worker: Worker, machine: MachineState, plan: Option<Plan>, log: LogRing) -> Self {
         Self {
-            driver,
+            worker,
+            machine,
+            activity: Activity::Idle,
+            note: None,
+            plan,
             console: None,
             help: false,
-            busy: None,
             step_index: DEFAULT_STEP_INDEX,
             pending_events: VecDeque::new(),
             last_log_len: log.len(),
@@ -59,22 +77,24 @@ impl App {
     }
 
     /// Run the event loop until the user quits. Event-driven + dirty: renders
-    /// only on a key, a resize, or new log lines (DESIGN.org §4).
+    /// only on a key, a resize, a worker event, or new log lines (DESIGN.org §4).
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
         let mut needs_redraw = true;
         while !self.should_quit {
             if needs_redraw {
-                self.draw(terminal)?;
+                terminal.draw(|frame| ui::draw(frame, self))?;
                 needs_redraw = false;
             }
 
-            if let Some(event) = self.next_event()? {
+            if let Some(event) = self.next_term_event()? {
                 match event {
-                    Event::Key(key) => needs_redraw |= self.on_key(key, terminal)?,
-                    Event::Resize(_, _) => needs_redraw = true,
+                    TermEvent::Key(key) => needs_redraw |= self.on_key(key),
+                    TermEvent::Resize(_, _) => needs_redraw = true,
                     _ => {}
                 }
             }
+
+            needs_redraw |= self.drain_worker_events();
 
             let len = self.log.len();
             if len != self.last_log_len {
@@ -82,11 +102,12 @@ impl App {
                 needs_redraw = true;
             }
         }
+        self.worker.shutdown();
         Ok(())
     }
 
-    /// Next event to process: a read-ahead one first, else poll the terminal.
-    fn next_event(&mut self) -> io::Result<Option<Event>> {
+    /// Next terminal event: a read-ahead one first, else poll the terminal.
+    fn next_term_event(&mut self) -> io::Result<Option<TermEvent>> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
         }
@@ -96,92 +117,104 @@ impl App {
         Ok(None)
     }
 
-    fn draw<B: Backend>(&self, terminal: &mut Terminal<B>) -> io::Result<()> {
-        terminal.draw(|frame| ui::draw(frame, self))?;
-        Ok(())
+    /// Fold all pending worker events into the local state; returns whether the
+    /// screen changed.
+    fn drain_worker_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(event) = self.worker.try_event() {
+            changed = true;
+            match event {
+                Event::Busy(label) => self.activity = Activity::Busy(label),
+                Event::State(machine) => {
+                    self.machine = machine;
+                    self.activity = Activity::Idle;
+                }
+                Event::Progress { done, total } => {
+                    self.activity = Activity::Drawing { done, total }
+                }
+                Event::PlanDone => self.note = Some("done".to_owned()),
+                Event::Aborted => self.note = Some("stopped".to_owned()),
+                Event::Error(err) => self.note = Some(format!("error: {err}")),
+            }
+        }
+        changed
     }
 
     /// Handle one key press; returns whether the screen has to be redrawn.
-    fn on_key<B: Backend>(
-        &mut self,
-        key: KeyEvent,
-        terminal: &mut Terminal<B>,
-    ) -> io::Result<bool> {
+    fn on_key(&mut self, key: KeyEvent) -> bool {
         let Some(action) = action_for(self.mode(), &key) else {
-            return Ok(false);
+            return false;
         };
         // While the overview is up, any key dismisses it and does nothing else
         // — except quitting, which people expect to work from anywhere.
         if self.help && action != Action::Quit {
             self.help = false;
-            return Ok(true);
+            return true;
         }
+        // A fresh action clears the last plan's note.
+        self.note = None;
         match action {
             Action::Quit => {
                 tracing::info!("quit requested");
                 self.should_quit = true;
-                Ok(true)
             }
-            Action::PenUp => self.run_command(terminal, "pen up", Driver::pen_up),
-            Action::PenDown => self.run_command(terminal, "pen down", Driver::pen_down),
-            Action::PenToggle => self.run_command(terminal, "pen", Driver::toggle_pen),
-            Action::Home => self.run_command(terminal, "homing", Driver::home),
-            Action::DisableMotors => {
-                self.run_command(terminal, "disabling motors", Driver::disable_motors)
-            }
-            Action::Jog { dx, dy } => self.jog(terminal, dx, dy),
+            Action::PenUp => self.worker.send(Command::PenUp),
+            Action::PenDown => self.worker.send(Command::PenDown),
+            Action::PenToggle => self.worker.send(Command::PenToggle),
+            Action::Home => self.worker.send(Command::Home),
+            Action::DisableMotors => self.worker.send(Command::DisableMotors),
+            Action::EmergencyStop => self.worker.send(Command::EmergencyStop),
+            Action::Jog { dx, dy } => self.jog(dx, dy),
             Action::StepBigger => {
                 self.step_index = (self.step_index + 1).min(JOG_STEPS_MM.len() - 1);
-                Ok(true)
             }
-            Action::StepSmaller => {
-                self.step_index = self.step_index.saturating_sub(1);
-                Ok(true)
-            }
-            Action::EmergencyStop => {
-                self.run_command(terminal, "emergency stop", Driver::emergency_stop)
-            }
+            Action::StepSmaller => self.step_index = self.step_index.saturating_sub(1),
+            Action::StartPlot => self.start_plot(),
             Action::OpenConsole => {
                 tracing::info!("raw G-code console open");
                 self.console = Some(String::new());
-                Ok(true)
             }
             Action::CloseConsole => {
                 tracing::info!("raw G-code console closed");
                 self.console = None;
-                Ok(true)
             }
             Action::Input(c) => {
                 if let Some(line) = &mut self.console {
                     line.push(c);
                 }
-                Ok(true)
             }
             Action::Backspace => {
                 if let Some(line) = &mut self.console {
                     line.pop();
                 }
-                Ok(true)
             }
-            Action::Submit => self.submit_console(terminal),
-            Action::ToggleHelp => {
-                self.help = !self.help;
-                Ok(true)
+            Action::Submit => self.submit_console(),
+            Action::ToggleHelp => self.help = !self.help,
+        }
+        true
+    }
+
+    /// Start drawing the loaded plan, if there is one.
+    fn start_plot(&mut self) {
+        match &self.plan {
+            Some(plan) => {
+                tracing::info!(ops = plan.ops.len(), "starting plot");
+                self.worker.send(Command::RunPlan(plan.clone()));
             }
+            None => self.note = Some("no SVG loaded".to_owned()),
         }
     }
 
     /// Jog by one step, coalescing a held arrow key into a single move.
     ///
-    /// Key auto-repeat can deliver arrows far faster than the (synchronous)
-    /// driver can round-trip each `$J=`. So before sending, drain the arrow
-    /// presses already waiting and sum them: holding "right" becomes one longer
-    /// jog instead of a backlog the carriage keeps chewing through after you let
-    /// go. Non-jog events found while draining are put back for the next loop.
-    fn jog<B: Backend>(&mut self, terminal: &mut Terminal<B>, dx: i8, dy: i8) -> io::Result<bool> {
+    /// Key auto-repeat can deliver arrows faster than a jog round-trips, so
+    /// before sending we drain the arrow presses already waiting and sum them:
+    /// holding "right" becomes one longer jog instead of a backlog. Non-jog
+    /// events found while draining are put back for the next loop.
+    fn jog(&mut self, dx: i8, dy: i8) {
         let (mut sx, mut sy) = (i32::from(dx), i32::from(dy));
-        while event::poll(Duration::ZERO)? {
-            let event = event::read()?;
+        while matches!(event::poll(Duration::ZERO), Ok(true)) {
+            let Ok(event) = event::read() else { break };
             match jog_of(&event) {
                 Some((jx, jy)) => {
                     sx += i32::from(jx);
@@ -195,20 +228,21 @@ impl App {
         }
 
         let step = JOG_STEPS_MM[self.step_index];
-        let (dx_mm, dy_mm) = (f64::from(sx) * step, f64::from(sy) * step);
-
-        self.busy = Some("jogging");
-        self.draw(terminal)?;
-        if let Err(err) = self.driver.jog(dx_mm, dy_mm) {
-            tracing::error!(%err, "jog failed");
-        }
-        self.busy = None;
-        Ok(true)
+        self.worker.send(Command::Jog {
+            dx_mm: f64::from(sx) * step,
+            dy_mm: f64::from(sy) * step,
+        });
     }
 
-    /// The current jog step in millimetres, for the status bar.
-    pub fn jog_step_mm(&self) -> f64 {
-        JOG_STEPS_MM[self.step_index]
+    /// Send the typed console line and keep the console open for the next one.
+    fn submit_console(&mut self) {
+        let Some(line) = self.console.as_mut().map(std::mem::take) else {
+            return;
+        };
+        let line = line.trim().to_owned();
+        if !line.is_empty() {
+            self.worker.send(Command::Raw(line));
+        }
     }
 
     /// Which key map applies right now — the console makes input textual.
@@ -219,60 +253,25 @@ impl App {
         }
     }
 
-    /// Send the typed line and keep the console open for the next one.
-    fn submit_console<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<bool> {
-        let Some(line) = self.console.as_mut().map(std::mem::take) else {
-            return Ok(false);
-        };
-        let line = line.trim().to_owned();
-        if line.is_empty() {
-            return Ok(true);
-        }
-
-        self.busy = Some("sending");
-        self.draw(terminal)?;
-        match self.driver.send_raw(&line) {
-            // The replies are already in the log panel via the TRACE wire log;
-            // this line names the command they belong to.
-            Ok(replies) => tracing::info!(%line, reply = %replies.join(" | "), "console"),
-            Err(err) => tracing::error!(%err, %line, "console command failed"),
-        }
-        self.busy = None;
-        Ok(true)
-    }
-
-    /// Show what is happening, then run a blocking driver command.
-    ///
-    /// The extra draw before the call is the point: `$H` takes seconds and the
-    /// driver is synchronous, so without it the TUI would simply freeze with no
-    /// explanation. The job worker (step 2.4) moves this off the UI thread.
-    ///
-    /// A failed command is logged, not propagated: a refused pen move or a
-    /// timeout is bad news, not a reason to lose the session — and the log
-    /// panel shows it immediately.
-    fn run_command<B: Backend>(
-        &mut self,
-        terminal: &mut Terminal<B>,
-        label: &'static str,
-        action: fn(&mut Driver) -> Result<(), DriverError>,
-    ) -> io::Result<bool> {
-        self.busy = Some(label);
-        self.draw(terminal)?;
-
-        if let Err(err) = action(&mut self.driver) {
-            tracing::error!(%err, "{label} failed");
-        }
-
-        self.busy = None;
-        Ok(true)
+    /// The current jog step in millimetres, for the status bar.
+    pub fn jog_step_mm(&self) -> f64 {
+        JOG_STEPS_MM[self.step_index]
     }
 
     pub fn log(&self) -> &LogRing {
         &self.log
     }
 
-    pub fn driver(&self) -> &Driver {
-        &self.driver
+    pub fn machine(&self) -> &MachineState {
+        &self.machine
+    }
+
+    pub fn activity(&self) -> &Activity {
+        &self.activity
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     /// The line being typed, when the console is open.
@@ -283,17 +282,15 @@ impl App {
     pub fn help_visible(&self) -> bool {
         self.help
     }
-
-    pub fn busy(&self) -> Option<&'static str> {
-        self.busy
-    }
 }
 
 /// The jog delta of an event, if it is a navigation-mode jog key press. Key
 /// releases (which some terminals emit) are ignored here so they neither add to
 /// the sum nor stop coalescing.
-fn jog_of(event: &Event) -> Option<(i8, i8)> {
-    let Event::Key(key) = event else { return None };
+fn jog_of(event: &TermEvent) -> Option<(i8, i8)> {
+    let TermEvent::Key(key) = event else {
+        return None;
+    };
     if key.kind == KeyEventKind::Release {
         // Treat as "not a boundary": skip it. Represented by a zero jog.
         return Some((0, 0));

@@ -4,20 +4,25 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{Activity, App};
 use crate::keys::{Binding, CONSOLE_BINDINGS, NAVIGATION_BINDINGS};
 
-/// Connection / job status. Job state follows once the worker exists (2.4).
+/// Connection / job status: identity, what the machine is doing, and the last
+/// plan result.
 pub fn status(frame: &mut Frame, area: Rect, app: &App) {
-    let driver = app.driver();
-    let activity = match app.busy() {
-        Some(label) => format!("{label}…"),
-        None => format!("pen {}, jog {} mm", driver.pen(), app.jog_step_mm()),
+    let machine = app.machine();
+    let activity = match app.activity() {
+        Activity::Idle => format!("pen {}, jog {} mm", machine.pen, app.jog_step_mm()),
+        Activity::Busy(label) => format!("{label}…"),
+        Activity::Drawing { done, total } => {
+            let pct = if *total > 0 { done * 100 / total } else { 0 };
+            format!("drawing {done}/{total} ({pct}%)")
+        }
     };
+    let note = app.note().map(|n| format!(" — {n}")).unwrap_or_default();
     let text = format!(
-        "Connected {} on {} — {activity} (? for keys)",
-        driver.version(),
-        driver.port(),
+        "Connected {} on {} — {activity}{note} (enter: draw, ? keys)",
+        machine.version, machine.port,
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));
     frame.render_widget(widget, area);

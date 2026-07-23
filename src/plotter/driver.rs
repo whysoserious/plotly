@@ -9,7 +9,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use super::Connection;
-use crate::geometry::Transform;
+use crate::geometry::{Point, Transform};
 
 /// How long a command may take to be acknowledged.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,6 +113,10 @@ pub struct Driver {
     settings: PenSettings,
     transform: Transform,
     pen: Pen,
+    /// Best-known machine-logical position (mm). Meaningful after `$H`; the
+    /// host tracks it by dead reckoning since the firmware volunteers nothing
+    /// but `?` (§2.4). Used for the preview cursor (step 2.5).
+    pos: Point,
 }
 
 impl Driver {
@@ -124,6 +128,7 @@ impl Driver {
             settings: PenSettings::default(),
             transform: Transform::idraw(),
             pen: Pen::Up,
+            pos: Point::new(0.0, 0.0),
         }
     }
 
@@ -137,6 +142,11 @@ impl Driver {
 
     pub fn pen(&self) -> Pen {
         self.pen
+    }
+
+    /// Best-known machine-logical position (mm).
+    pub fn position(&self) -> Point {
+        self.pos
     }
 
     /// Lift the pen (no-op if already up).
@@ -169,6 +179,7 @@ impl Driver {
         tracing::info!("homing");
         self.command_within("$H", HOMING_TIMEOUT)?;
         self.pen = Pen::Up;
+        self.pos = Point::new(0.0, 0.0);
         tracing::info!("homed; machine origin is now the home corner");
         Ok(())
     }
@@ -209,7 +220,33 @@ impl Driver {
         }
         let _ = write!(line, " F{JOG_FEED}");
         tracing::debug!(dx_mm, dy_mm, %line, "jog");
-        self.command(&line)
+        self.command(&line)?;
+        // Jog deltas are logical mm in the same frame as the tracked position.
+        self.pos = Point::new(self.pos.x + dx_mm, self.pos.y + dy_mm);
+        Ok(())
+    }
+
+    /// Move to an absolute machine-logical point (mm) at the current feed.
+    ///
+    /// The point is mapped to the wire with the axis [`Transform`] (§2.2) and
+    /// sent as one `G1` — feed is modal, set separately by [`Driver::set_feed`].
+    pub fn move_to(&mut self, target: Point) -> Result<(), DriverError> {
+        let wire = self.transform.map_point(target);
+        // Adding 0.0 turns a mapped -0.0 back into 0.0, so a Y=0 move prints
+        // "Y0.000" rather than "Y-0.000".
+        self.command(&format!("G1 X{:.3} Y{:.3}", wire.x + 0.0, wire.y + 0.0))?;
+        self.pos = target;
+        Ok(())
+    }
+
+    /// Set the modal feed rate (mm/min) for subsequent moves.
+    pub fn set_feed(&mut self, feed: u32) -> Result<(), DriverError> {
+        self.command(&format!("G1 F{feed}"))
+    }
+
+    /// Pause in place for `seconds` (`G4 P`).
+    pub fn dwell(&mut self, seconds: f64) -> Result<(), DriverError> {
+        self.command(&format!("G4 P{seconds:.3}"))
     }
 
     /// Send an arbitrary line typed by the user and collect the replies.
