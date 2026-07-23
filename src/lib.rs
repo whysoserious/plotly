@@ -8,6 +8,7 @@ pub mod cli;
 pub mod geometry;
 pub mod keys;
 pub mod logging;
+pub mod plan;
 pub mod plotter;
 pub mod tui;
 pub mod ui;
@@ -26,6 +27,20 @@ pub fn run() -> io::Result<()> {
 
     if args.panic_test {
         panic!("synthetic panic to exercise the logging panic hook");
+    }
+
+    // Load the drawing early (before touching hardware), so a broken SVG is
+    // reported on a normal terminal. Building it into a plan is step 2.3.
+    if let Some(path) = &args.svg_file {
+        match plan::svg::load(path) {
+            Ok(svg) => tracing::info!(
+                file = %path.display(),
+                paths = svg.path_count(),
+                points = svg.point_count(),
+                "SVG loaded"
+            ),
+            Err(err) => return Err(fail("cannot load the SVG", err)),
+        }
     }
 
     // Resolve and greet the plotter before entering the alternate screen, so

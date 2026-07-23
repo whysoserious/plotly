@@ -649,7 +649,7 @@ od razu*. Zamiast tego:
   znaki, 2.3) — tablica przypadków; I: ~Jog~ emituje przeliczoną linię ~G91 G1~.
 
 ** Faza 2 — SVG → Plan → rysowanie + stop
-- [ ] *2.1 Parsing SVG → polilinie mm.* ~plan/svg.rs~: ~usvg~ + flatten ~kurbo~ z tolerancją;
+- [X] *2.1 Parsing SVG → polilinie mm.* ~plan/svg.rs~: ~usvg~ + flatten ~kurbo~ z tolerancją;
   rozdzielczość style/transform/~use~. /Test:/ ~--simulate logo.svg~ + ~--log-level debug~ →
   „N ścieżek, M punktów". /Auto:/ U: znany SVG (kwadrat 10×10 mm) → 4 wierzchołki w mm; łuk →
   polilinia w tolerancji. I: plik testowy w ~tests/fixtures/~.

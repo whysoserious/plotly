@@ -13,6 +13,24 @@
 //! holds that linear part `L`; step 2.2 adds the translation for absolute
 //! points on top of the same `L`.
 
+/// A point in millimetres. Used for logical (drawing) coordinates throughout;
+/// the wire mapping is done by [`Transform`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    pub fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+}
+
+/// An open or closed run of connected points (a flattened path). Closedness is
+/// implicit: a closed subpath ends with a point equal to its first.
+pub type Polyline = Vec<Point>;
+
 /// Linear part of the logical↔wire map (`L`): optional axis swap, then a
 /// per-axis scale carrying both the unit factor and the sign.
 #[derive(Debug, Clone, Copy)]
