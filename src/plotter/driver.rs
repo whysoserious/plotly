@@ -4,13 +4,19 @@
 //! `ok` means "queued", not "finished" (§15.1) — good enough for pen moves,
 //! but the job worker (step 2.4) will need `?` to know when motion really ends.
 
+use std::fmt::Write as _;
 use std::io;
 use std::time::{Duration, Instant};
 
 use super::Connection;
+use crate::geometry::Transform;
 
 /// How long a command may take to be acknowledged.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Feed rate for jog moves, mm/min. Well under the machine max (`$110`≈15000,
+/// §15.1) so a fat-fingered hold cannot slam the carriage at full speed.
+const JOG_FEED: u32 = 3000;
 
 /// How long a homing cycle may take. Unlike every other command, `$H` answers
 /// `ok` only when the cycle *finishes* — measured at 3–7 s on an A0 machine
@@ -105,6 +111,7 @@ impl From<io::Error> for DriverError {
 pub struct Driver {
     connection: Connection,
     settings: PenSettings,
+    transform: Transform,
     pen: Pen,
 }
 
@@ -115,6 +122,7 @@ impl Driver {
         Self {
             connection,
             settings: PenSettings::default(),
+            transform: Transform::idraw(),
             pen: Pen::Up,
         }
     }
@@ -174,6 +182,34 @@ impl Driver {
         self.command("$SLP")?;
         tracing::warn!("motors disabled; position is unknown until the next homing");
         Ok(())
+    }
+
+    /// Jog by a logical delta in millimetres (right = +X, up the page = +Y).
+    ///
+    /// Uses Grbl's `$J=` jog, confirmed working in the spike (§15.1): it plans
+    /// like a normal move but stays outside the job queue, so it is the right
+    /// primitive for interactive nudging. The delta is mapped through the
+    /// [`Transform`] first, so pressing "right" moves the carriage physically
+    /// right whatever the wire axes turn out to be (§2.3).
+    ///
+    /// No bounds check yet — that arrives with host-side clipping in step 2.4;
+    /// until then a jog can run the carriage into the frame, exactly as the
+    /// reference driver's manual jog does.
+    pub fn jog(&mut self, dx_mm: f64, dy_mm: f64) -> Result<(), DriverError> {
+        let (wx, wy) = self.transform.map_vector(dx_mm, dy_mm);
+        if wx == 0.0 && wy == 0.0 {
+            return Ok(());
+        }
+        let mut line = String::from("$J=G91");
+        if wx != 0.0 {
+            let _ = write!(line, " X{wx:.3}");
+        }
+        if wy != 0.0 {
+            let _ = write!(line, " Y{wy:.3}");
+        }
+        let _ = write!(line, " F{JOG_FEED}");
+        tracing::debug!(dx_mm, dy_mm, %line, "jog");
+        self.command(&line)
     }
 
     /// Send an arbitrary line typed by the user and collect the replies.
@@ -302,6 +338,44 @@ mod tests {
         assert_eq!(d.pen(), Pen::Down);
         d.toggle_pen().unwrap();
         assert_eq!(d.pen(), Pen::Up);
+    }
+
+    #[test]
+    fn jog_right_maps_to_wire_plus_x() {
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let mut d = driver_on(transport);
+
+        d.jog(10.0, 0.0).unwrap();
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec!["$J=G91 X10.000 F3000".to_owned()]
+        );
+    }
+
+    #[test]
+    fn jog_up_the_page_flips_to_wire_plus_y() {
+        // Logical +Y is "up the page"; on this machine that is wire -Y... but a
+        // positive logical Y is "down", so up-arrow (logical -Y) must be wire +Y.
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let mut d = driver_on(transport);
+
+        d.jog(0.0, -5.0).unwrap();
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec!["$J=G91 Y5.000 F3000".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_zero_jog_sends_nothing() {
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let mut d = driver_on(transport);
+
+        d.jog(0.0, 0.0).unwrap();
+        assert!(sent.lock().unwrap().is_empty());
     }
 
     #[test]

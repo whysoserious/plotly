@@ -640,7 +640,7 @@ od razu*. Zamiast tego:
   jednoklawiszowe — sekcja 8!); wyślij dowolną linię, pokaż odpowiedź. /Test:/ wpisz ~M3 S100~
   — ~S~ NIE wywołuje STOP; w mocku widać ~->~/~<-~. /Auto:/ U: router wejścia — w trybie tekst
   ~S~ trafia do bufora, w trybie nawigacji ~S~ = ~Command::EStop~.
-- [ ] *1.6 ✱ Jog strzałkami + zmiana kroku.* ~geometry.rs~: *wprowadź* ~Transform~ (część
+- [X] *1.6 ✱ Jog strzałkami + zmiana kroku.* ~geometry.rs~: *wprowadź* ~Transform~ (część
   liniowa ~L~ „logiczny↔G-code": zamiana X↔Y, znaki, skala — stałe ze spike'u 0.7) z metodą
   ~map_vector(dx,dy)~ (delta mm → drut; translacja origin się skraca). ~Jog{dx,dy}~ wysyła
   ~G91 G1~ przez ~map_vector~ (fallback; ~$J=~ tylko jeśli spike ✔); ~+~/~-~ zmienia krok

@@ -1,5 +1,5 @@
-//! Integration test for step 1.4: homing and motor release, from the key press
-//! down to the bytes on the wire.
+//! Integration test for steps 1.4 and 1.6: homing, motor release and jog, from
+//! the key press down to the bytes on the wire.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -61,4 +61,47 @@ fn d_releases_the_motors_with_a_single_command() {
     driver.disable_motors().expect("the mock answers ok");
 
     assert_eq!(*sent.lock().unwrap(), vec!["$SLP".to_owned()]);
+}
+
+#[test]
+fn right_arrow_jogs_the_carriage_in_wire_plus_x() {
+    // Right arrow -> logical +X -> wire +X on this machine (spike 0.7).
+    assert_eq!(
+        action_for(
+            Mode::Navigation,
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+        ),
+        Some(Action::Jog { dx: 1, dy: 0 })
+    );
+
+    let (mut driver, sent) = driver_with_log();
+    // A 5 mm step to the right, as the app would compute it.
+    driver.jog(5.0, 0.0).expect("the mock answers ok");
+
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec!["$J=G91 X5.000 F3000".to_owned()]
+    );
+}
+
+#[test]
+fn up_arrow_jog_reaches_the_far_edge_as_wire_plus_y() {
+    // Up arrow is "up the page" = logical -Y, which flips to wire +Y.
+    let dy = match action_for(
+        Mode::Navigation,
+        &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    ) {
+        Some(Action::Jog { dy, .. }) => dy,
+        other => panic!("up arrow produced {other:?}"),
+    };
+
+    let (mut driver, sent) = driver_with_log();
+    driver
+        .jog(0.0, f64::from(dy) * 1.0)
+        .expect("the mock answers ok");
+
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec!["$J=G91 Y1.000 F3000".to_owned()]
+    );
 }

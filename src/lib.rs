@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod geometry;
 pub mod keys;
 pub mod logging;
 pub mod plotter;

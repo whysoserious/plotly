@@ -26,6 +26,15 @@ pub enum Action {
     PenToggle,
     Home,
     DisableMotors,
+    /// Jog by the current step in a logical direction (right = +X, up = up the
+    /// page). The driver maps it through the axis transform (§2.3).
+    Jog {
+        dx: i8,
+        dy: i8,
+    },
+    /// Grow or shrink the jog step (0.1 / 1 / 5 / 10 mm).
+    StepBigger,
+    StepSmaller,
     /// Abort: pen up, then soft reset. Full plan abort lands in step 2.7.
     EmergencyStop,
     OpenConsole,
@@ -56,6 +65,18 @@ pub struct Binding {
 /// keeps them from drifting apart, since a shortcut nobody can discover is as
 /// good as missing.
 pub const NAVIGATION_BINDINGS: &[Binding] = &[
+    Binding {
+        keys: "arrows",
+        probe: Some(KeyCode::Right),
+        action: Action::Jog { dx: 1, dy: 0 },
+        description: "jog XY by the current step",
+    },
+    Binding {
+        keys: "+  /  -",
+        probe: Some(KeyCode::Char('+')),
+        action: Action::StepBigger,
+        description: "jog step: 0.1 / 1 / 5 / 10 mm",
+    },
     Binding {
         keys: "[  /  PgUp",
         probe: Some(KeyCode::Char('[')),
@@ -162,6 +183,13 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('[') | KeyCode::PageUp => Some(Action::PenUp),
         KeyCode::Char(']') | KeyCode::PageDown => Some(Action::PenDown),
         KeyCode::Char(' ') => Some(Action::PenToggle),
+        KeyCode::Right => Some(Action::Jog { dx: 1, dy: 0 }),
+        KeyCode::Left => Some(Action::Jog { dx: -1, dy: 0 }),
+        // Up-arrow is "up the page": logical -Y in the SVG frame (§2.3).
+        KeyCode::Up => Some(Action::Jog { dx: 0, dy: -1 }),
+        KeyCode::Down => Some(Action::Jog { dx: 0, dy: 1 }),
+        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::StepBigger),
+        KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
         KeyCode::Char('h') => Some(Action::Home),
         KeyCode::Char('d') => Some(Action::DisableMotors),
         KeyCode::Char('S') => Some(Action::EmergencyStop),
@@ -210,6 +238,29 @@ mod tests {
         assert_eq!(nav(KeyCode::Char('d')), Some(Action::DisableMotors));
         assert_eq!(nav(KeyCode::Char('c')), Some(Action::OpenConsole));
         assert_eq!(nav(KeyCode::Char('S')), Some(Action::EmergencyStop));
+    }
+
+    #[test]
+    fn arrows_jog_in_logical_directions() {
+        assert_eq!(nav(KeyCode::Right), Some(Action::Jog { dx: 1, dy: 0 }));
+        assert_eq!(nav(KeyCode::Left), Some(Action::Jog { dx: -1, dy: 0 }));
+        // Up the page is logical -Y in the SVG frame (§2.3).
+        assert_eq!(nav(KeyCode::Up), Some(Action::Jog { dx: 0, dy: -1 }));
+        assert_eq!(nav(KeyCode::Down), Some(Action::Jog { dx: 0, dy: 1 }));
+    }
+
+    #[test]
+    fn step_size_keys_have_shifted_aliases() {
+        assert_eq!(nav(KeyCode::Char('+')), Some(Action::StepBigger));
+        assert_eq!(nav(KeyCode::Char('=')), Some(Action::StepBigger));
+        assert_eq!(nav(KeyCode::Char('-')), Some(Action::StepSmaller));
+        assert_eq!(nav(KeyCode::Char('_')), Some(Action::StepSmaller));
+    }
+
+    #[test]
+    fn arrows_do_nothing_in_the_console() {
+        // In the console, arrows are not text and not jogs — just inert for now.
+        assert_eq!(console_key(KeyCode::Right), None);
     }
 
     #[test]
@@ -266,6 +317,8 @@ mod tests {
     fn the_help_screen_matches_the_key_map() {
         let documented: Vec<Action> = NAVIGATION_BINDINGS.iter().map(|b| b.action).collect();
         for action in [
+            Action::Jog { dx: 1, dy: 0 },
+            Action::StepBigger,
             Action::PenUp,
             Action::PenDown,
             Action::PenToggle,

@@ -12,7 +12,7 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     let driver = app.driver();
     let activity = match app.busy() {
         Some(label) => format!("{label}…"),
-        None => format!("pen {}", driver.pen()),
+        None => format!("pen {}, jog {} mm", driver.pen(), app.jog_step_mm()),
     };
     let text = format!(
         "Connected {} on {} — {activity} (? for keys)",
