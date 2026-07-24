@@ -9,6 +9,7 @@
 use std::ops::ControlFlow;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::geometry::Point;
 use crate::plan::{Op, Plan};
@@ -40,6 +41,12 @@ pub enum Command {
     Pause,
     /// Resume a paused plan.
     Resume,
+    /// Stop the running plan `after` has elapsed, lifting the pen if `pen_up`.
+    /// A safety cutoff; acts on the next op boundary once the time is up (§9).
+    StopAfter {
+        after: Duration,
+        pen_up: bool,
+    },
     /// Finish and let the thread exit.
     Shutdown,
 }
@@ -180,9 +187,13 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
                 Err(err) => ("console", Err(err)),
             }
         }
-        // Pause/Resume only mean something during a plan; ignore them here.
+        // Pause/Resume/StopAfter only mean something during a plan; ignore here.
         // RunPlan/Shutdown are handled by the loop, never reach here.
-        Command::Pause | Command::Resume | Command::RunPlan(_) | Command::Shutdown => ("", Ok(())),
+        Command::Pause
+        | Command::Resume
+        | Command::StopAfter { .. }
+        | Command::RunPlan(_)
+        | Command::Shutdown => ("", Ok(())),
     };
     if let Err(err) = result {
         tracing::error!(%err, "{label} failed");
@@ -203,10 +214,17 @@ fn run_plan(
     let total = plan.ops.len();
     emit(events, Event::Busy("drawing".to_owned()));
 
+    // A timed safety cutoff, armed by `StopAfter` and checked each boundary.
+    let mut cutoff: Option<(Instant, bool)> = None;
+
     for (index, op) in plan.ops.iter().enumerate() {
         // A stop/pause only has to land on an op boundary (short ops keep it
         // snappy). `index` is the count already drawn — the resume checkpoint.
         match commands.try_recv() {
+            Ok(Command::StopAfter { after, pen_up }) => {
+                tracing::info!(?after, pen_up, "timed stop armed");
+                cutoff = Some((Instant::now() + after, pen_up));
+            }
             Ok(command) => {
                 match handle_interrupt(driver, command, index, total, commands, events) {
                     Interrupt::Continue => {}
@@ -219,6 +237,13 @@ fn run_plan(
                 return ControlFlow::Break(());
             }
             Err(TryRecvError::Empty) => {}
+        }
+
+        // The timer only has to fire by the next boundary after it elapses.
+        if let Some(pen_up) = cutoff_fired(cutoff, Instant::now()) {
+            tracing::info!(done = index, pen_up, "timed stop");
+            stop_plan(driver, events, pen_up);
+            return ControlFlow::Continue(());
         }
 
         if let Err(err) = apply(driver, op) {
@@ -337,13 +362,25 @@ fn pause(
     Interrupt::Shutdown
 }
 
-/// Lift the pen and report the abort, best-effort.
-fn abort(driver: &mut Driver, events: &Sender<Event>) {
-    if let Err(err) = driver.pen_up() {
-        tracing::warn!(%err, "pen up during abort failed");
+/// Whether an armed cutoff has elapsed by `now`; yields its pen-up flag.
+fn cutoff_fired(cutoff: Option<(Instant, bool)>, now: Instant) -> Option<bool> {
+    cutoff.and_then(|(deadline, pen_up)| (now >= deadline).then_some(pen_up))
+}
+
+/// Stop the plan, lifting the pen only if asked, and report it.
+fn stop_plan(driver: &mut Driver, events: &Sender<Event>, pen_up: bool) {
+    if pen_up {
+        if let Err(err) = driver.pen_up() {
+            tracing::warn!(%err, "pen up during stop failed");
+        }
     }
     emit(events, Event::Aborted);
     emit(events, Event::State(snapshot(driver)));
+}
+
+/// Lift the pen and report the abort, best-effort.
+fn abort(driver: &mut Driver, events: &Sender<Event>) {
+    stop_plan(driver, events, true);
 }
 
 /// Translate one plan op into a driver call.
@@ -369,4 +406,34 @@ fn snapshot(driver: &Driver) -> MachineState {
 fn emit(events: &Sender<Event>, event: Event) {
     // A closed receiver means the app is shutting down; nothing to do.
     let _ = events.send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disarmed_cutoff_never_fires() {
+        assert_eq!(cutoff_fired(None, Instant::now()), None);
+    }
+
+    #[test]
+    fn a_cutoff_fires_only_once_its_deadline_passes() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(50);
+        assert_eq!(cutoff_fired(Some((deadline, true)), now), None);
+        assert_eq!(
+            cutoff_fired(Some((deadline, true)), deadline + Duration::from_millis(1)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_cutoff_carries_its_pen_up_choice() {
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            cutoff_fired(Some((past, false)), Instant::now()),
+            Some(false)
+        );
+    }
 }

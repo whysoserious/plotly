@@ -141,6 +141,58 @@ fn panic_stop_aborts_with_a_soft_reset() {
 }
 
 #[test]
+fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
+    let (mut worker, sent, _rt) = slow_worker();
+    let total = long_plan().ops.len();
+
+    worker.send(Command::RunPlan(long_plan()));
+    // Accelerated "time": a 30 ms cutoff, with pen-up. The plan (~150 ops at
+    // 3 ms/read) runs well past it, so it stops partway.
+    worker.send(Command::StopAfter {
+        after: Duration::from_millis(30),
+        pen_up: true,
+    });
+
+    let (end, done) = wait_for_end(&worker);
+    assert!(matches!(end, Some(Event::Aborted)), "expected a timed stop");
+    assert!(done < total, "stopped after {done} of {total} ops");
+
+    worker.shutdown();
+
+    let sent = sent.lock().unwrap();
+    assert!(
+        sent.iter().any(|l| l.contains("Z0.500")),
+        "no pen-up on the timed stop: {sent:?}"
+    );
+}
+
+#[test]
+fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
+    let (mut worker, sent, _rt) = slow_worker();
+
+    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::StopAfter {
+        after: Duration::from_millis(30),
+        pen_up: false,
+    });
+
+    let (end, _done) = wait_for_end(&worker);
+    assert!(matches!(end, Some(Event::Aborted)));
+
+    // Count pen-up Z moves before shutdown; the exit $SLP is separate.
+    let pen_ups = sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("Z0.500"))
+        .count();
+    worker.shutdown();
+
+    // The plan lowered the pen once (PenDown) and never raised it on the stop.
+    assert_eq!(pen_ups, 0, "pen was lifted despite pen_up=false");
+}
+
+#[test]
 fn a_zero_op_reference_keeps_the_helpers_honest() {
     // Guards the test's own assumptions: the plan really has many ops, and the
     // MoveTo lines map through the identity transform as expected.

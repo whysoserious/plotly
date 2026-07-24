@@ -27,6 +27,10 @@ const JOG_STEPS_MM: [f64; 4] = [0.1, 1.0, 5.0, 10.0];
 /// Index into [`JOG_STEPS_MM`] the app starts on (1 mm).
 const DEFAULT_STEP_INDEX: usize = 1;
 
+/// Safety-timer options cycled by `t`, in minutes (§9). `t` steps through these
+/// then back to off; an armed timer stops the plot and lifts the pen.
+const STOP_TIMER_MINUTES: [u64; 3] = [1, 5, 15];
+
 /// What the machine is doing, for the status bar. Derived from worker events.
 #[derive(Debug, Clone)]
 pub enum Activity {
@@ -51,6 +55,8 @@ pub struct App {
     help: bool,
     /// Current jog step, as an index into [`JOG_STEPS_MM`].
     step_index: usize,
+    /// Armed safety timer as an index into [`STOP_TIMER_MINUTES`]; `None` = off.
+    stop_timer: Option<usize>,
     /// Terminal events read ahead during jog coalescing, not yet handled.
     pending_events: VecDeque<TermEvent>,
     log: LogRing,
@@ -69,6 +75,7 @@ impl App {
             console: None,
             help: false,
             step_index: DEFAULT_STEP_INDEX,
+            stop_timer: None,
             pending_events: VecDeque::new(),
             last_log_len: log.len(),
             log,
@@ -176,6 +183,7 @@ impl App {
             }
             Action::StepSmaller => self.step_index = self.step_index.saturating_sub(1),
             Action::StartPlot => self.start_plot(),
+            Action::CycleStopTimer => self.cycle_stop_timer(),
             Action::OpenConsole => {
                 tracing::info!("raw G-code console open");
                 self.console = Some(String::new());
@@ -200,15 +208,39 @@ impl App {
         true
     }
 
-    /// Start drawing the loaded plan, if there is one.
+    /// Start drawing the loaded plan, if there is one, arming the safety timer.
     fn start_plot(&mut self) {
-        match &self.plan {
-            Some(plan) => {
-                tracing::info!(ops = plan.ops.len(), "starting plot");
-                self.worker.send(Command::RunPlan(plan.clone()));
-            }
-            None => self.note = Some("no SVG loaded".to_owned()),
+        let Some(plan) = &self.plan else {
+            self.note = Some("no SVG loaded".to_owned());
+            return;
+        };
+        tracing::info!(ops = plan.ops.len(), "starting plot");
+        self.worker.send(Command::RunPlan(plan.clone()));
+        // Arm the timed cutoff, if set, right after the plan starts (§2.8).
+        if let Some(minutes) = self.stop_timer_minutes() {
+            self.worker.send(Command::StopAfter {
+                after: Duration::from_secs(minutes * 60),
+                pen_up: true,
+            });
         }
+    }
+
+    /// Cycle the safety timer: off → 1 → 5 → 15 min → off.
+    fn cycle_stop_timer(&mut self) {
+        self.stop_timer = match self.stop_timer {
+            None => Some(0),
+            Some(i) if i + 1 < STOP_TIMER_MINUTES.len() => Some(i + 1),
+            Some(_) => None,
+        };
+        match self.stop_timer_minutes() {
+            Some(m) => tracing::info!(minutes = m, "safety timer armed"),
+            None => tracing::info!("safety timer off"),
+        }
+    }
+
+    /// The armed safety-timer duration in minutes, if any (for the status bar).
+    pub fn stop_timer_minutes(&self) -> Option<u64> {
+        self.stop_timer.map(|i| STOP_TIMER_MINUTES[i])
     }
 
     /// Jog by one step, coalescing a held arrow key into a single move.

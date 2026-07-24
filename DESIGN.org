@@ -427,6 +427,7 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~Space~ | toggle pen (jawny ruch Z, nie ~$TP~ — 1.3) |
 | ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
 | ~Enter~ | start rysowania wczytanego SVG |
+| ~t~ | timer bezpieczeństwa: off / 1 / 5 / 15 min (stop + pen up) — 2.8 |
 | ~h~ | home (~$H~) |
 | ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
 | ~o~ | set origin (work offset) |
@@ -682,7 +683,7 @@ od razu*. Zamiast tego:
   pióro i staje; ~Esc~/~r~ wstrzymuje/wznawia; panic STOP działa też z otwartej konsoli ~c~
   (gdzie ~S~ jest tekstem). /Auto:/ I: na mocku Command ~Stop~ między op zatrzymuje wysyłkę
   i emituje pen-up; ~Pause~/~Resume~ zachowuje ~committed_index~; ~EStop~ z trybu tekstowego wyzwala abort.
-- [ ] *2.8 Stop po czasie / stop+pen-up po czasie.* ~StopAfter{dur, pen_up}~: timer →
+- [X] *2.8 Stop po czasie / stop+pen-up po czasie.* ~StopAfter{dur, pen_up}~: timer →
   flaga → zadziała na granicy op. /Test:/ ~--simulate~: zadanie staje po ~T~ s (±długość op);
   z pen-up pióro w górze. /Auto:/ U: logika deadline (czy granica op po ~T~ wyzwala stop);
   I: na mocku z przyspieszonym „czasem".

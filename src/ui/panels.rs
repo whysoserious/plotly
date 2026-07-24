@@ -19,9 +19,13 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
             format!("drawing {done}/{total} ({pct}%)")
         }
     };
+    let timer = app
+        .stop_timer_minutes()
+        .map(|m| format!(", timer {m}m"))
+        .unwrap_or_default();
     let note = app.note().map(|n| format!(" — {n}")).unwrap_or_default();
     let text = format!(
-        "Connected {} on {} — {activity}{note} (enter: draw, ? keys)",
+        "Connected {} on {} — {activity}{timer}{note} (enter: draw, ? keys)",
         machine.version, machine.port,
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));

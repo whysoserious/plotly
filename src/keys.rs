@@ -37,6 +37,8 @@ pub enum Action {
     StepSmaller,
     /// Start drawing the loaded plan.
     StartPlot,
+    /// Cycle the timed stop-and-pen-up safety cutoff (off / … / off).
+    CycleStopTimer,
     /// Pause the running plan (feed-hold).
     Pause,
     /// Resume a paused plan.
@@ -90,6 +92,12 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         probe: Some(KeyCode::Enter),
         action: Action::StartPlot,
         description: "draw the loaded SVG",
+    },
+    Binding {
+        keys: "t",
+        probe: Some(KeyCode::Char('t')),
+        action: Action::CycleStopTimer,
+        description: "safety timer: off / 1 / 5 / 15 min (stop + pen up)",
     },
     Binding {
         keys: "[  /  PgUp",
@@ -219,6 +227,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::StepBigger),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
         KeyCode::Enter => Some(Action::StartPlot),
+        KeyCode::Char('t') => Some(Action::CycleStopTimer),
         KeyCode::Esc => Some(Action::Pause),
         KeyCode::Char('r') => Some(Action::Resume),
         KeyCode::Char('S') => Some(Action::Stop),
@@ -373,6 +382,7 @@ mod tests {
             Action::Jog { dx: 1, dy: 0 },
             Action::StepBigger,
             Action::StartPlot,
+            Action::CycleStopTimer,
             Action::PenUp,
             Action::PenDown,
             Action::PenToggle,
