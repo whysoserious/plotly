@@ -83,6 +83,10 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
         assert_eq!(*reported_total, total);
     }
 
+    // Shut down first: the mock shares its `sent` lock, and shutdown now sends
+    // $SLP, so inspecting the log while holding the lock would deadlock.
+    worker.shutdown();
+
     // Every MoveTo produced the expected wire line, in order.
     let sent = sent.lock().unwrap();
     let moves: Vec<String> = sent
@@ -91,8 +95,20 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
         .cloned()
         .collect();
     assert_eq!(moves, expected);
+}
 
+#[test]
+fn motors_are_released_on_shutdown() {
+    let (mut worker, sent) = worker_on_mock();
     worker.shutdown();
+
+    // The worker's last act is $SLP, leaving the machine safe on exit.
+    let sent = sent.lock().unwrap();
+    assert_eq!(
+        sent.last().map(String::as_str),
+        Some("$SLP"),
+        "sent: {sent:?}"
+    );
 }
 
 #[test]
@@ -110,11 +126,11 @@ fn a_y_zero_move_prints_without_negative_zero() {
             break;
         }
     }
+    worker.shutdown();
 
     let sent = sent.lock().unwrap();
     assert!(
         sent.iter().any(|l| l == "G1 X10.000 Y0.000"),
         "sent lines: {sent:?}"
     );
-    worker.shutdown();
 }

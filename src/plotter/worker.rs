@@ -6,6 +6,7 @@
 //! never touches the transport directly — it sends commands and reacts to
 //! events, which keeps the TUI responsive while `$H` or a long plan runs.
 
+use std::ops::ControlFlow;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
@@ -123,12 +124,24 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
     while let Ok(command) = commands.recv() {
         match command {
             Command::Shutdown => break,
-            Command::RunPlan(plan) => run_plan(&mut driver, &plan, commands, events),
+            // A plan can absorb a Shutdown between ops; when it does, honour it
+            // here too instead of looping back to a `recv` that would block.
+            Command::RunPlan(plan) => {
+                if run_plan(&mut driver, &plan, commands, events).is_break() {
+                    break;
+                }
+            }
             other => {
                 run_one(&mut driver, other, events);
                 emit(events, Event::State(snapshot(&driver)));
             }
         }
+    }
+
+    // Leave the machine safe on exit: release the steppers (user request). The
+    // carriage can then be moved by hand; the next session re-homes anyway.
+    if let Err(err) = driver.disable_motors() {
+        tracing::warn!(%err, "could not disable motors on exit");
     }
     tracing::info!("plotter thread exiting");
 }
@@ -169,12 +182,15 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
 }
 
 /// Draw a whole plan op by op, checking for a stop between ops.
+///
+/// Returns [`ControlFlow::Break`] when it consumed a `Shutdown` (or the channel
+/// closed), so the caller ends the thread instead of blocking on the next recv.
 fn run_plan(
     driver: &mut Driver,
     plan: &Plan,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
-) {
+) -> ControlFlow<()> {
     let total = plan.ops.len();
     emit(events, Event::Busy("drawing".to_owned()));
 
@@ -184,11 +200,11 @@ fn run_plan(
             Ok(Command::Stop | Command::EmergencyStop) => {
                 tracing::info!(done = index, total, "plan stopped");
                 abort(driver, events);
-                return;
+                return ControlFlow::Continue(());
             }
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
                 abort(driver, events);
-                return;
+                return ControlFlow::Break(());
             }
             // Other commands are ignored while a plan runs (queue is drained).
             Ok(_) | Err(TryRecvError::Empty) => {}
@@ -198,7 +214,7 @@ fn run_plan(
             tracing::error!(%err, done = index, "plan op failed");
             emit(events, Event::Error(err.to_string()));
             abort(driver, events);
-            return;
+            return ControlFlow::Continue(());
         }
         emit(
             events,
@@ -212,6 +228,7 @@ fn run_plan(
     tracing::info!(ops = total, "plan done");
     emit(events, Event::PlanDone);
     emit(events, Event::State(snapshot(driver)));
+    ControlFlow::Continue(())
 }
 
 /// Lift the pen and report the abort, best-effort.
