@@ -671,7 +671,7 @@ od razu*. Zamiast tego:
 - [X] *2.5 Podgląd braille + pozycja.* ~ui/canvas.rs~: toolpath na canvasie braille'owym +
   kursor pozycji (z planu; ~?~ tylko jeśli spike ✔). /Test:/ ~--simulate~: rysunek zgadza się
   z SVG, kursor wędruje. /Auto:/ U: mapowanie mm→komórki braille (skala/clamp do canvasu).
-- [ ] *2.6 ✱ Pierwszy realny wydruk.* Pełny pipeline na sprzęcie. /Test:/ ✱ kwadrat/logo
+- [X] *2.6 ✱ Pierwszy realny wydruk.* Pełny pipeline na sprzęcie. /Test:/ ✱ kwadrat/logo
   wychodzi *we właściwej orientacji i skali* (weryfikacja transformu 2.2!). Linijką: wymiar mm.
 - [ ] *2.7 Stop / pauza / wznów + panic STOP.* Wariant wg spike'u (realtime ~!~/=~= lub
   kooperatywny — sekcja 9); ~Esc~ pauza, ~r~ wznów, ~S~ STOP (pen-up). *Panic STOP = osobny,
