@@ -195,6 +195,21 @@ impl Driver {
         Ok(())
     }
 
+    /// Feed-hold (`!`): pause motion, keeping position. Realtime, confirmed in
+    /// the spike (§15.1); no `ok` follows, so this just writes the byte.
+    pub fn feed_hold(&mut self) -> Result<(), DriverError> {
+        tracing::info!("feed hold");
+        self.connection.transport.write_realtime(b'!')?;
+        Ok(())
+    }
+
+    /// Cycle-start (`~`): resume after a feed-hold. Realtime, no `ok`.
+    pub fn resume(&mut self) -> Result<(), DriverError> {
+        tracing::info!("cycle start");
+        self.connection.transport.write_realtime(b'~')?;
+        Ok(())
+    }
+
     /// Jog by a logical delta in millimetres (right = +X, up the page = +Y).
     ///
     /// Uses Grbl's `$J=` jog, confirmed working in the spike (§15.1): it plans

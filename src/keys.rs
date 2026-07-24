@@ -37,8 +37,14 @@ pub enum Action {
     StepSmaller,
     /// Start drawing the loaded plan.
     StartPlot,
-    /// Abort: pen up, then soft reset. Full plan abort lands in step 2.7.
-    EmergencyStop,
+    /// Pause the running plan (feed-hold).
+    Pause,
+    /// Resume a paused plan.
+    Resume,
+    /// Stop the running plan and lift the pen.
+    Stop,
+    /// Panic abort: pen up, then soft reset. Always active, even in the console.
+    PanicStop,
     OpenConsole,
     CloseConsole,
     /// A character typed into the console.
@@ -116,10 +122,22 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         description: "release the motors ($SLP) - position unknown afterwards",
     },
     Binding {
+        keys: "esc  /  r",
+        probe: Some(KeyCode::Esc),
+        action: Action::Pause,
+        description: "pause / resume the plot",
+    },
+    Binding {
         keys: "S",
         probe: Some(KeyCode::Char('S')),
-        action: Action::EmergencyStop,
-        description: "emergency stop: pen up, then soft reset",
+        action: Action::Stop,
+        description: "stop the plot, pen up",
+    },
+    Binding {
+        keys: "ctrl-c  /  ctrl-x",
+        probe: None,
+        action: Action::PanicStop,
+        description: "panic: pen up + reset (works in the console too)",
     },
     Binding {
         keys: "c",
@@ -134,7 +152,7 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         description: "this list",
     },
     Binding {
-        keys: "q  /  ctrl-c",
+        keys: "q",
         probe: Some(KeyCode::Char('q')),
         action: Action::Quit,
         description: "quit",
@@ -162,10 +180,10 @@ pub const CONSOLE_BINDINGS: &[Binding] = &[
         description: "close the console",
     },
     Binding {
-        keys: "ctrl-c",
+        keys: "ctrl-c  /  ctrl-x",
         probe: None,
-        action: Action::Quit,
-        description: "quit",
+        action: Action::PanicStop,
+        description: "panic: pen up + reset",
     },
 ];
 
@@ -184,10 +202,12 @@ pub fn action_for(mode: Mode, key: &KeyEvent) -> Option<Action> {
 }
 
 fn navigation(key: &KeyEvent) -> Option<Action> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Panic stop is always active and takes priority over every other binding.
+    if let Some(action) = panic_stop(key) {
+        return Some(action);
+    }
     match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
-        KeyCode::Char('c') if ctrl => Some(Action::Quit),
         KeyCode::Char('[') | KeyCode::PageUp => Some(Action::PenUp),
         KeyCode::Char(']') | KeyCode::PageDown => Some(Action::PenDown),
         KeyCode::Char(' ') => Some(Action::PenToggle),
@@ -199,9 +219,11 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::StepBigger),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
         KeyCode::Enter => Some(Action::StartPlot),
+        KeyCode::Esc => Some(Action::Pause),
+        KeyCode::Char('r') => Some(Action::Resume),
+        KeyCode::Char('S') => Some(Action::Stop),
         KeyCode::Char('h') => Some(Action::Home),
         KeyCode::Char('d') => Some(Action::DisableMotors),
-        KeyCode::Char('S') => Some(Action::EmergencyStop),
         KeyCode::Char('c') => Some(Action::OpenConsole),
         KeyCode::Char('?') | KeyCode::F(1) => Some(Action::ToggleHelp),
         _ => None,
@@ -209,15 +231,27 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
 }
 
 fn console(key: &KeyEvent) -> Option<Action> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Panic stop fires even while typing — it must not be swallowed as text.
+    if let Some(action) = panic_stop(key) {
+        return Some(action);
+    }
     match key.code {
-        // Ctrl-C leaves the app from any mode; it is not typed into the line.
-        KeyCode::Char('c') if ctrl => Some(Action::Quit),
         KeyCode::Esc => Some(Action::CloseConsole),
         KeyCode::Enter => Some(Action::Submit),
         KeyCode::Backspace => Some(Action::Backspace),
         // Everything printable is text — including q, S, space and brackets.
         KeyCode::Char(c) => Some(Action::Input(c)),
+        _ => None,
+    }
+}
+
+/// Ctrl-C / Ctrl-X → panic stop, in any mode. This replaces the old
+/// Ctrl-C-quits binding (§2.7): while the plotter runs, the safe reflex on that
+/// chord is to lift the pen and abort, not to drop the session.
+fn panic_stop(key: &KeyEvent) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') | KeyCode::Char('x') if ctrl => Some(Action::PanicStop),
         _ => None,
     }
 }
@@ -246,7 +280,13 @@ mod tests {
         assert_eq!(nav(KeyCode::Char('h')), Some(Action::Home));
         assert_eq!(nav(KeyCode::Char('d')), Some(Action::DisableMotors));
         assert_eq!(nav(KeyCode::Char('c')), Some(Action::OpenConsole));
-        assert_eq!(nav(KeyCode::Char('S')), Some(Action::EmergencyStop));
+        assert_eq!(nav(KeyCode::Char('S')), Some(Action::Stop));
+    }
+
+    #[test]
+    fn pause_resume_are_bound_in_navigation() {
+        assert_eq!(nav(KeyCode::Esc), Some(Action::Pause));
+        assert_eq!(nav(KeyCode::Char('r')), Some(Action::Resume));
     }
 
     #[test]
@@ -279,15 +319,17 @@ mod tests {
     }
 
     #[test]
-    fn quit_on_q_and_ctrl_c_but_not_plain_c() {
+    fn q_quits_but_ctrl_c_is_now_a_panic_stop() {
         assert_eq!(nav(KeyCode::Char('q')), Some(Action::Quit));
         assert_eq!(
             action_for(
                 Mode::Navigation,
                 &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
             ),
-            Some(Action::Quit)
+            Some(Action::PanicStop)
         );
+        // Plain c still opens the console.
+        assert_eq!(nav(KeyCode::Char('c')), Some(Action::OpenConsole));
     }
 
     /// The reason this module exists: `M3 S100` typed in the console must reach
@@ -309,14 +351,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_still_quits_from_the_console() {
-        assert_eq!(
-            action_for(
-                Mode::Console,
-                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
-            ),
-            Some(Action::Quit)
-        );
+    fn panic_stop_fires_from_both_modes_including_ctrl_x() {
+        for mode in [Mode::Navigation, Mode::Console] {
+            for code in [KeyCode::Char('c'), KeyCode::Char('x')] {
+                assert_eq!(
+                    action_for(mode, &KeyEvent::new(code, KeyModifiers::CONTROL)),
+                    Some(Action::PanicStop),
+                    "{mode:?} {code:?}"
+                );
+            }
+        }
     }
 
     /// Every navigation shortcut on the help screen must actually work, and
@@ -334,7 +378,9 @@ mod tests {
             Action::PenToggle,
             Action::Home,
             Action::DisableMotors,
-            Action::EmergencyStop,
+            Action::Pause,
+            Action::Stop,
+            Action::PanicStop,
             Action::OpenConsole,
             Action::ToggleHelp,
             Action::Quit,

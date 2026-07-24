@@ -18,6 +18,9 @@ pub struct MockTransport {
     version: String,
     /// When set, the board answers nothing at all (a dead or wrong-baud link).
     mute: bool,
+    /// Sleep before each read, to give a plan measurable duration so a test can
+    /// inject a stop/pause mid-run. Zero by default (instant).
+    read_delay: std::time::Duration,
     responses: VecDeque<String>,
     /// Shared so a test can still watch the traffic after the transport has
     /// been handed to a driver (see [`MockTransport::sent_handle`]).
@@ -42,6 +45,7 @@ impl MockTransport {
         Self {
             version: version.to_owned(),
             mute: false,
+            read_delay: std::time::Duration::ZERO,
             responses: VecDeque::new(),
             sent: Arc::new(Mutex::new(Vec::new())),
             realtime: Arc::new(Mutex::new(Vec::new())),
@@ -52,6 +56,15 @@ impl MockTransport {
     pub fn unresponsive() -> Self {
         Self {
             mute: true,
+            ..Self::new()
+        }
+    }
+
+    /// A board whose every read takes `delay`, so a plan runs slowly enough for
+    /// a test to inject a stop or pause partway through.
+    pub fn with_read_delay(delay: std::time::Duration) -> Self {
+        Self {
+            read_delay: delay,
             ..Self::new()
         }
     }
@@ -89,6 +102,11 @@ impl MockTransport {
     pub fn realtime(&self) -> Vec<u8> {
         self.realtime.lock().expect("mock log poisoned").clone()
     }
+
+    /// Handle to the realtime-byte log that outlives moving the transport.
+    pub fn realtime_handle(&self) -> Arc<Mutex<Vec<u8>>> {
+        Arc::clone(&self.realtime)
+    }
 }
 
 impl Transport for MockTransport {
@@ -104,8 +122,12 @@ impl Transport for MockTransport {
         Ok(())
     }
 
-    /// Answers instantly from the queue; `window` is irrelevant in-process.
+    /// Answers from the queue; `window` is irrelevant in-process. A configured
+    /// `read_delay` slows each read so a plan takes measurable time.
     fn read_line_for(&mut self, _window: Duration) -> io::Result<Option<String>> {
+        if !self.read_delay.is_zero() {
+            std::thread::sleep(self.read_delay);
+        }
         let response = self.responses.pop_front();
         if let Some(line) = &response {
             tracing::trace!(target: "plotly::transport", "<- {line:?}");

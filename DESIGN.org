@@ -424,18 +424,20 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 |---------+-------|
 | ~← ↑ → ↓~ | jog XY o bieżący krok |
 | ~+~ / ~-~ | zmień krok jog (0.1 / 1 / 5 / 10 mm) |
-| ~Space~ | toggle pen (~$TP~) |
+| ~Space~ | toggle pen (jawny ruch Z, nie ~$TP~ — 1.3) |
 | ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
+| ~Enter~ | start rysowania wczytanego SVG |
 | ~h~ | home (~$H~) |
 | ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
 | ~o~ | set origin (work offset) |
 | ~f~ | frame — obrysuj bounding box pracy (pen-up) |
 | ~g~ | go-to XY (wpisz współrzędne) |
-| ~Esc~ | pause (feed-hold ~!~ ❓; fallback: pauza kooperatywna) |
-| ~r~ / =~= | resume (=~= ❓; fallback: wznów wysyłanie segmentów) |
-| ~S~ | *STOP* (abort: soft-reset + pen up) — zawsze aktywny |
+| ~Esc~ | pause (feed-hold ~!~ ✔ realtime — 2.7); w konsoli zamyka konsolę |
+| ~r~ | resume (cycle-start =~= ✔ realtime) |
+| ~S~ | *STOP* planu + pen up (kooperatywnie między op) |
+| ~Ctrl-C~ / ~Ctrl-X~ | *panic STOP*: pen up + soft-reset ~0x18~ — zawsze aktywny, też w konsoli |
 | ~c~ | konsola surowego G-code |
-| ~q~ | quit (graceful) |
+| ~q~ | quit (graceful; gasi silniki ~$SLP~ przy wyjściu) |
 
 Teksty w UI po angielsku; tabela tu jest tylko dokumentacją. Keymap *konfigurowalny w TOML*.
 *Wejście jest modalne:* skróty jednoklawiszowe (np. ~S~, ~Space~) działają w trybie nawigacji,
@@ -673,7 +675,7 @@ od razu*. Zamiast tego:
   z SVG, kursor wędruje. /Auto:/ U: mapowanie mm→komórki braille (skala/clamp do canvasu).
 - [X] *2.6 ✱ Pierwszy realny wydruk.* Pełny pipeline na sprzęcie. /Test:/ ✱ kwadrat/logo
   wychodzi *we właściwej orientacji i skali* (weryfikacja transformu 2.2!). Linijką: wymiar mm.
-- [ ] *2.7 Stop / pauza / wznów + panic STOP.* Wariant wg spike'u (realtime ~!~/=~= lub
+- [X] *2.7 Stop / pauza / wznów + panic STOP.* Wariant wg spike'u (realtime ~!~/=~= lub
   kooperatywny — sekcja 9); ~Esc~ pauza, ~r~ wznów, ~S~ STOP (pen-up). *Panic STOP = osobny,
   zawsze aktywny skrót* niełapany w polach tekstowych (~Ctrl-C~/~Ctrl-X~, sekcja 8) → pen-up +
   abort; zastępuje „graceful quit na Ctrl-C" z 0.4, gdy plotter działa. /Test:/ ✱ ~S~ podnosi

@@ -32,10 +32,14 @@ pub enum Command {
     Raw(String),
     /// Draw a whole plan.
     RunPlan(Plan),
-    /// Abort: pen up, then soft reset (also aborts a running plan between ops).
+    /// Panic abort: pen up, then soft reset (also aborts a running plan).
     EmergencyStop,
     /// Stop drawing the current plan (pen up), keep the connection.
     Stop,
+    /// Feed-hold the running plan (pause).
+    Pause,
+    /// Resume a paused plan.
+    Resume,
     /// Finish and let the thread exit.
     Shutdown,
 }
@@ -58,6 +62,8 @@ pub enum Event {
     State(MachineState),
     /// Progress through the current plan, one per executed op.
     Progress { done: usize, total: usize },
+    /// The plan is paused (feed-hold) at `done`/`total`.
+    Paused { done: usize, total: usize },
     /// The plan finished on its own.
     PlanDone,
     /// The plan was stopped or aborted before the end.
@@ -162,6 +168,8 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
             emit(events, Event::Busy("emergency stop".to_owned()));
             ("emergency stop", driver.emergency_stop())
         }
+        // Stop while idle just makes sure the pen is up.
+        Command::Stop => ("stop", driver.pen_up()),
         Command::Raw(line) => {
             emit(events, Event::Busy("sending".to_owned()));
             match driver.send_raw(&line) {
@@ -172,8 +180,9 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
                 Err(err) => ("console", Err(err)),
             }
         }
-        // Stop/RunPlan/Shutdown are handled by the loop, never reach here.
-        Command::Stop | Command::RunPlan(_) | Command::Shutdown => ("", Ok(())),
+        // Pause/Resume only mean something during a plan; ignore them here.
+        // RunPlan/Shutdown are handled by the loop, never reach here.
+        Command::Pause | Command::Resume | Command::RunPlan(_) | Command::Shutdown => ("", Ok(())),
     };
     if let Err(err) = result {
         tracing::error!(%err, "{label} failed");
@@ -195,19 +204,21 @@ fn run_plan(
     emit(events, Event::Busy("drawing".to_owned()));
 
     for (index, op) in plan.ops.iter().enumerate() {
-        // A stop only has to land on an op boundary (short ops keep it snappy).
+        // A stop/pause only has to land on an op boundary (short ops keep it
+        // snappy). `index` is the count already drawn — the resume checkpoint.
         match commands.try_recv() {
-            Ok(Command::Stop | Command::EmergencyStop) => {
-                tracing::info!(done = index, total, "plan stopped");
-                abort(driver, events);
-                return ControlFlow::Continue(());
+            Ok(command) => {
+                match handle_interrupt(driver, command, index, total, commands, events) {
+                    Interrupt::Continue => {}
+                    Interrupt::Stopped => return ControlFlow::Continue(()),
+                    Interrupt::Shutdown => return ControlFlow::Break(()),
+                }
             }
-            Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
+            Err(TryRecvError::Disconnected) => {
                 abort(driver, events);
                 return ControlFlow::Break(());
             }
-            // Other commands are ignored while a plan runs (queue is drained).
-            Ok(_) | Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Empty) => {}
         }
 
         if let Err(err) = apply(driver, op) {
@@ -229,6 +240,101 @@ fn run_plan(
     emit(events, Event::PlanDone);
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(())
+}
+
+/// Outcome of a command received mid-plan.
+enum Interrupt {
+    /// Keep drawing.
+    Continue,
+    /// Stop this plan; keep serving other commands.
+    Stopped,
+    /// End the worker thread.
+    Shutdown,
+}
+
+/// Act on a command that arrived between ops. Handles pause by blocking here
+/// until resume (or a stop), so `done`/`total` — the resume checkpoint — is
+/// preserved across the hold.
+fn handle_interrupt(
+    driver: &mut Driver,
+    command: Command,
+    done: usize,
+    total: usize,
+    commands: &Receiver<Command>,
+    events: &Sender<Event>,
+) -> Interrupt {
+    match command {
+        Command::Stop => {
+            tracing::info!(done, total, "plan stopped");
+            abort(driver, events);
+            Interrupt::Stopped
+        }
+        Command::EmergencyStop => {
+            tracing::warn!(done, total, "plan aborted (panic)");
+            if let Err(err) = driver.emergency_stop() {
+                tracing::warn!(%err, "emergency stop failed");
+            }
+            emit(events, Event::Aborted);
+            emit(events, Event::State(snapshot(driver)));
+            Interrupt::Stopped
+        }
+        Command::Pause => pause(driver, done, total, commands, events),
+        Command::Shutdown => {
+            abort(driver, events);
+            Interrupt::Shutdown
+        }
+        // Resume with no hold, or anything else, is a no-op mid-plan.
+        _ => Interrupt::Continue,
+    }
+}
+
+/// Feed-hold and block until resumed, stopped or shut down.
+fn pause(
+    driver: &mut Driver,
+    done: usize,
+    total: usize,
+    commands: &Receiver<Command>,
+    events: &Sender<Event>,
+) -> Interrupt {
+    if let Err(err) = driver.feed_hold() {
+        tracing::warn!(%err, "feed hold failed");
+    }
+    tracing::info!(done, total, "plan paused");
+    emit(events, Event::Paused { done, total });
+
+    while let Ok(command) = commands.recv() {
+        match command {
+            Command::Resume => {
+                if let Err(err) = driver.resume() {
+                    tracing::warn!(%err, "resume failed");
+                }
+                tracing::info!(done, total, "plan resumed");
+                emit(events, Event::Busy("drawing".to_owned()));
+                return Interrupt::Continue;
+            }
+            Command::Stop => {
+                abort(driver, events);
+                return Interrupt::Stopped;
+            }
+            Command::EmergencyStop => {
+                if let Err(err) = driver.emergency_stop() {
+                    tracing::warn!(%err, "emergency stop failed");
+                }
+                emit(events, Event::Aborted);
+                emit(events, Event::State(snapshot(driver)));
+                return Interrupt::Stopped;
+            }
+            Command::Shutdown => {
+                abort(driver, events);
+                return Interrupt::Shutdown;
+            }
+            // Ignore anything else (including a second Pause) while held.
+            _ => {}
+        }
+    }
+    // Channel closed while paused.
+    abort(driver, events);
+    Interrupt::Shutdown
 }
 
 /// Lift the pen and report the abort, best-effort.

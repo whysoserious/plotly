@@ -132,6 +132,9 @@ impl App {
                 Event::Progress { done, total } => {
                     self.activity = Activity::Drawing { done, total }
                 }
+                Event::Paused { done, total } => {
+                    self.activity = Activity::Busy(format!("paused {done}/{total} (r resume)"));
+                }
                 Event::PlanDone => self.note = Some("done".to_owned()),
                 Event::Aborted => self.note = Some("stopped".to_owned()),
                 Event::Error(err) => self.note = Some(format!("error: {err}")),
@@ -163,7 +166,10 @@ impl App {
             Action::PenToggle => self.worker.send(Command::PenToggle),
             Action::Home => self.worker.send(Command::Home),
             Action::DisableMotors => self.worker.send(Command::DisableMotors),
-            Action::EmergencyStop => self.worker.send(Command::EmergencyStop),
+            Action::Pause => self.worker.send(Command::Pause),
+            Action::Resume => self.worker.send(Command::Resume),
+            Action::Stop => self.worker.send(Command::Stop),
+            Action::PanicStop => self.worker.send(Command::EmergencyStop),
             Action::Jog { dx, dy } => self.jog(dx, dy),
             Action::StepBigger => {
                 self.step_index = (self.step_index + 1).min(JOG_STEPS_MM.len() - 1);

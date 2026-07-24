@@ -42,11 +42,12 @@ fn typing_m3_s100_produces_text_not_commands() {
 #[test]
 fn the_same_keys_are_commands_outside_the_console() {
     let s = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE);
-    assert_eq!(
-        action_for(Mode::Navigation, &s),
-        Some(Action::EmergencyStop)
-    );
+    assert_eq!(action_for(Mode::Navigation, &s), Some(Action::Stop));
     assert_eq!(action_for(Mode::Console, &s), Some(Action::Input('S')));
+
+    // Panic stop, on the other hand, must fire even while typing (§2.7).
+    let panic = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(action_for(Mode::Console, &panic), Some(Action::PanicStop));
 }
 
 #[test]
