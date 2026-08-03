@@ -6,6 +6,7 @@
 pub mod app;
 pub mod cli;
 pub mod geometry;
+pub mod job;
 pub mod keys;
 pub mod logging;
 pub mod plan;
@@ -52,7 +53,8 @@ pub fn run() -> io::Result<()> {
     let connection =
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
-    run_tui(plotter::driver::Driver::new(connection), plan, log)
+    let source = args.svg_file.as_ref().map(|p| p.display().to_string());
+    run_tui(plotter::driver::Driver::new(connection), plan, source, log)
 }
 
 /// Log the loaded drawing, fit it to the field, and build the plan to draw.
@@ -108,6 +110,7 @@ fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> 
 fn run_tui(
     driver: plotter::driver::Driver,
     plan: Option<plan::Plan>,
+    source: Option<String>,
     log: logging::LogRing,
 ) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
@@ -124,5 +127,5 @@ fn run_tui(
     let worker = plotter::worker::Worker::spawn(driver);
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(worker, machine, plan, log).run(&mut terminal)
+    app::App::new(worker, machine, plan, source, log).run(&mut terminal)
 }

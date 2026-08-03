@@ -11,7 +11,7 @@ use crate::geometry::{Placement, Point, Polyline};
 /// One executable step. Coordinates are machine-logical millimetres; the worker
 /// maps them to the wire with the axis [`crate::geometry::Transform`] at emit
 /// time (§2.2), so a plan is independent of the machine's wiring.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     /// Lift the pen.
     PenUp,

@@ -15,7 +15,7 @@
 
 /// A point in millimetres. Used for logical (drawing) coordinates throughout;
 /// the wire mapping is done by [`Transform`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub x: f64,
     pub y: f64,

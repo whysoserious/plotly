@@ -12,6 +12,7 @@ use crossterm::event::{self, Event as TermEvent, KeyEvent, KeyEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
+use crate::job::{self, Job};
 use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::Plan;
@@ -49,6 +50,10 @@ pub struct App {
     note: Option<String>,
     /// The plan built from the loaded SVG, if any; `Enter` draws it.
     plan: Option<Plan>,
+    /// Source SVG path, recorded in a job's metadata (§6).
+    source: Option<String>,
+    /// The job directory for the current print, created when it starts (§3.1).
+    job: Option<Job>,
     /// Raw G-code console (step 1.5): `Some` while open, holding the typed line.
     console: Option<String>,
     /// Whether the key overview is covering the screen.
@@ -65,13 +70,21 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(worker: Worker, machine: MachineState, plan: Option<Plan>, log: LogRing) -> Self {
+    pub fn new(
+        worker: Worker,
+        machine: MachineState,
+        plan: Option<Plan>,
+        source: Option<String>,
+        log: LogRing,
+    ) -> Self {
         Self {
             worker,
             machine,
             activity: Activity::Idle,
             note: None,
             plan,
+            source,
+            job: None,
             console: None,
             help: false,
             step_index: DEFAULT_STEP_INDEX,
@@ -215,6 +228,10 @@ impl App {
             return;
         };
         tracing::info!(ops = plan.ops.len(), "starting plot");
+
+        // Persist the job so the print can be resumed after a crash (§3.1).
+        self.job = self.create_job(plan);
+
         self.worker.send(Command::RunPlan(plan.clone()));
         // Arm the timed cutoff, if set, right after the plan starts (§2.8).
         if let Some(minutes) = self.stop_timer_minutes() {
@@ -222,6 +239,19 @@ impl App {
                 after: Duration::from_secs(minutes * 60),
                 pen_up: true,
             });
+        }
+    }
+
+    /// Create the on-disk job for `plan`, or log why it could not be made.
+    /// A persistence failure is not fatal — the print can still run.
+    fn create_job(&self, plan: &Plan) -> Option<Job> {
+        let root = job::jobs_root()?;
+        match Job::create(&root, plan, self.source.as_deref()) {
+            Ok(job) => Some(job),
+            Err(err) => {
+                tracing::warn!(%err, "could not persist the job; drawing anyway");
+                None
+            }
         }
     }
 

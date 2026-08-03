@@ -689,7 +689,7 @@ od razu*. Zamiast tego:
   I: na mocku z przyspieszonym „czasem".
 
 ** Faza 3 — trwałość i wznawianie
-- [ ] *3.1 Katalog jobu + zapis ~plan.jsonl~.* ~job.rs~ + ~directories~ (~data_dir~ na macOS —
+- [X] *3.1 Katalog jobu + zapis ~plan.jsonl~.* ~job.rs~ + ~directories~ (~data_dir~ na macOS —
   uwaga z sekcji 6!). /Test:/ start jobu tworzy katalog z ~plan.jsonl~ i ~meta.json~. /Auto:/
   U: ścieżka bazowa per-OS (mock ~ProjectDirs~); I: round-trip ~Plan~ → jsonl → ~Plan~ równe.
 - [ ] *3.2 ~progress.json~ atomowo + ~committed_index~.* Zapis temp+rename po każdej zmianie
