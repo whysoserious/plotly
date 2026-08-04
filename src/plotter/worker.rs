@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::geometry::Point;
+use crate::job::ProgressWriter;
 use crate::plan::{Op, Plan};
 
 use super::driver::{Driver, DriverError, Pen};
@@ -31,8 +32,11 @@ pub enum Command {
     },
     /// Send a raw line typed in the console.
     Raw(String),
-    /// Draw a whole plan.
-    RunPlan(Plan),
+    /// Draw a whole plan, checkpointing progress through `progress` if given.
+    RunPlan {
+        plan: Plan,
+        progress: Option<ProgressWriter>,
+    },
     /// Panic abort: pen up, then soft reset (also aborts a running plan).
     EmergencyStop,
     /// Stop drawing the current plan (pen up), keep the connection.
@@ -139,8 +143,8 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
             Command::Shutdown => break,
             // A plan can absorb a Shutdown between ops; when it does, honour it
             // here too instead of looping back to a `recv` that would block.
-            Command::RunPlan(plan) => {
-                if run_plan(&mut driver, &plan, commands, events).is_break() {
+            Command::RunPlan { plan, progress } => {
+                if run_plan(&mut driver, &plan, progress.as_ref(), commands, events).is_break() {
                     break;
                 }
             }
@@ -192,7 +196,7 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
         Command::Pause
         | Command::Resume
         | Command::StopAfter { .. }
-        | Command::RunPlan(_)
+        | Command::RunPlan { .. }
         | Command::Shutdown => ("", Ok(())),
     };
     if let Err(err) = result {
@@ -208,6 +212,7 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
 fn run_plan(
     driver: &mut Driver,
     plan: &Plan,
+    progress: Option<&ProgressWriter>,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
 ) -> ControlFlow<()> {
@@ -228,12 +233,19 @@ fn run_plan(
             Ok(command) => {
                 match handle_interrupt(driver, command, index, total, commands, events) {
                     Interrupt::Continue => {}
-                    Interrupt::Stopped => return ControlFlow::Continue(()),
-                    Interrupt::Shutdown => return ControlFlow::Break(()),
+                    Interrupt::Stopped => {
+                        checkpoint(progress, index, total, driver);
+                        return ControlFlow::Continue(());
+                    }
+                    Interrupt::Shutdown => {
+                        checkpoint(progress, index, total, driver);
+                        return ControlFlow::Break(());
+                    }
                 }
             }
             Err(TryRecvError::Disconnected) => {
                 abort(driver, events);
+                checkpoint(progress, index, total, driver);
                 return ControlFlow::Break(());
             }
             Err(TryRecvError::Empty) => {}
@@ -243,6 +255,7 @@ fn run_plan(
         if let Some(pen_up) = cutoff_fired(cutoff, Instant::now()) {
             tracing::info!(done = index, pen_up, "timed stop");
             stop_plan(driver, events, pen_up);
+            checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(());
         }
 
@@ -250,21 +263,35 @@ fn run_plan(
             tracing::error!(%err, done = index, "plan op failed");
             emit(events, Event::Error(err.to_string()));
             abort(driver, events);
+            checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(());
         }
-        emit(
-            events,
-            Event::Progress {
-                done: index + 1,
-                total,
-            },
-        );
+        let sent = index + 1;
+        emit(events, Event::Progress { done: sent, total });
+        checkpoint(progress, sent, total, driver);
     }
 
     tracing::info!(ops = total, "plan done");
+    if let Some(writer) = progress {
+        let pos = driver.position();
+        if let Err(err) = writer.finish(total, [pos.x, pos.y]) {
+            tracing::warn!(%err, "final progress write failed");
+        }
+    }
     emit(events, Event::PlanDone);
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(())
+}
+
+/// Atomically checkpoint progress, if a writer is attached. `sent` is the count
+/// of ops acknowledged; the writer lags it by the planner depth (§6).
+fn checkpoint(progress: Option<&ProgressWriter>, sent: usize, total: usize, driver: &Driver) {
+    let Some(writer) = progress else { return };
+    let pos = driver.position();
+    let pen_down = driver.pen() == Pen::Down;
+    if let Err(err) = writer.checkpoint(sent, total, [pos.x, pos.y], pen_down) {
+        tracing::warn!(%err, "progress checkpoint failed");
+    }
 }
 
 /// Outcome of a command received mid-plan.

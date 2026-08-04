@@ -61,7 +61,10 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
     let (mut worker, sent, _rt) = slow_worker();
     let total = long_plan().ops.len();
 
-    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
     std::thread::sleep(Duration::from_millis(20)); // let a few ops go out
     worker.send(Command::Stop);
 
@@ -86,7 +89,10 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
 fn pause_holds_then_resume_finishes_the_plan() {
     let (mut worker, _sent, realtime) = slow_worker();
 
-    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::Pause);
 
@@ -124,7 +130,10 @@ fn pause_holds_then_resume_finishes_the_plan() {
 fn panic_stop_aborts_with_a_soft_reset() {
     let (mut worker, _sent, realtime) = slow_worker();
 
-    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::EmergencyStop);
 
@@ -145,7 +154,10 @@ fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
     let (mut worker, sent, _rt) = slow_worker();
     let total = long_plan().ops.len();
 
-    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
     // Accelerated "time": a 30 ms cutoff, with pen-up. The plan (~150 ops at
     // 3 ms/read) runs well past it, so it stops partway.
     worker.send(Command::StopAfter {
@@ -170,7 +182,10 @@ fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
 fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
     let (mut worker, sent, _rt) = slow_worker();
 
-    worker.send(Command::RunPlan(long_plan()));
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
     worker.send(Command::StopAfter {
         after: Duration::from_millis(30),
         pen_up: false,

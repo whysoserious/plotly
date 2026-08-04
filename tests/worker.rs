@@ -58,7 +58,10 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
     let expected = expected_move_lines(&plan);
 
     let (mut worker, sent) = worker_on_mock();
-    worker.send(Command::RunPlan(plan));
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+    });
 
     // Collect progress until the plan finishes.
     let mut progress = Vec::new();
@@ -118,7 +121,10 @@ fn a_y_zero_move_prints_without_negative_zero() {
         ops: vec![Op::MoveTo(Point::new(10.0, 0.0))],
     };
     let (mut worker, sent) = worker_on_mock();
-    worker.send(Command::RunPlan(plan));
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+    });
 
     // Wait for the plan to finish.
     while let Some(event) = worker.recv_timeout(TIMEOUT) {

@@ -22,6 +22,18 @@ use crate::plan::{Op, Plan};
 
 const PLAN_FILE: &str = "plan.jsonl";
 const META_FILE: &str = "meta.json";
+const PROGRESS_FILE: &str = "progress.json";
+
+/// Grbl planner buffer depth (`[OPT:…,15,…]`, §15.1). An `ok` means "queued",
+/// not "drawn", so up to this many trailing ops may be lost on a hard kill.
+pub const PLANNER_BLOCKS: usize = 15;
+
+/// The op index that is safe to treat as drawn, given `sent` ops acknowledged
+/// and a planner `buffer_depth` (0 = variant A, we know it finished;
+/// [`PLANNER_BLOCKS`] = variant B, `ok` only meant queued — §6).
+pub fn committed_index(sent: usize, buffer_depth: usize) -> usize {
+    sent.saturating_sub(buffer_depth)
+}
 
 /// Base directory holding every job folder, or `None` if the platform exposes
 /// no home directory.
@@ -69,10 +81,107 @@ impl Job {
         Ok(Self { id, dir })
     }
 
-    /// Path of the progress file (written in step 3.2).
+    /// Path of the progress file.
     pub fn progress_path(&self) -> PathBuf {
-        self.dir.join("progress.json")
+        self.dir.join(PROGRESS_FILE)
     }
+
+    /// A sink the worker uses to checkpoint progress as it draws.
+    pub fn progress_writer(&self) -> ProgressWriter {
+        ProgressWriter {
+            path: self.progress_path(),
+            job_id: self.id,
+        }
+    }
+}
+
+/// Resume checkpoint, rewritten atomically as the print advances (§6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    pub job_id: u64,
+    /// Ops safe to treat as drawn — the next op to send on resume.
+    pub committed_index: usize,
+    /// Total ops in the plan (the resume denominator).
+    pub total: usize,
+    /// Last commanded position, machine-logical mm (not `MPos`; §6).
+    pub pos: [f64; 2],
+    /// Whether the pen was down at the checkpoint.
+    pub pen_down: bool,
+    pub updated_at_ms: u64,
+}
+
+impl Progress {
+    /// Whether this job still has ops left to draw.
+    pub fn is_unfinished(&self) -> bool {
+        self.committed_index < self.total
+    }
+
+    /// Percent complete, for the resume prompt.
+    pub fn percent(&self) -> u8 {
+        match self.total {
+            0 => 100,
+            total => (self.committed_index * 100 / total) as u8,
+        }
+    }
+}
+
+/// Writes [`Progress`] to a job directory. Held by the worker while drawing so
+/// it can checkpoint without knowing about the [`Job`] type.
+#[derive(Debug, Clone)]
+pub struct ProgressWriter {
+    path: PathBuf,
+    job_id: u64,
+}
+
+impl ProgressWriter {
+    /// Atomically record a checkpoint: `sent` ops acknowledged out of `total`,
+    /// at commanded position `pos`, pen `pen_down`. The committed index lags
+    /// `sent` by the planner depth so a hard kill loses no drawn geometry (§6).
+    pub fn checkpoint(
+        &self,
+        sent: usize,
+        total: usize,
+        pos: [f64; 2],
+        pen_down: bool,
+    ) -> io::Result<()> {
+        let progress = Progress {
+            job_id: self.job_id,
+            committed_index: committed_index(sent, PLANNER_BLOCKS),
+            total,
+            pos,
+            pen_down,
+            updated_at_ms: now_ms(),
+        };
+        write_atomic(&self.path, &progress)
+    }
+
+    /// Record the plan as fully drawn (`committed_index == total`).
+    pub fn finish(&self, total: usize, pos: [f64; 2]) -> io::Result<()> {
+        let progress = Progress {
+            job_id: self.job_id,
+            committed_index: total,
+            total,
+            pos,
+            pen_down: false,
+            updated_at_ms: now_ms(),
+        };
+        write_atomic(&self.path, &progress)
+    }
+}
+
+/// Read a job's progress checkpoint.
+pub fn read_progress(dir: &Path) -> io::Result<Progress> {
+    let text = fs::read_to_string(dir.join(PROGRESS_FILE))?;
+    serde_json::from_str(&text).map_err(invalid_data)
+}
+
+/// Write JSON to `path` atomically: to a sibling temp file, then rename over
+/// the target. A crash mid-write leaves either the old file or the new, never
+/// a half-written one (rename is atomic on a POSIX filesystem).
+fn write_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    write_json(&tmp, value)?;
+    fs::rename(&tmp, path)
 }
 
 /// Write a plan as JSON Lines: one [`Op`] per line, in order.
@@ -173,6 +282,50 @@ mod tests {
         // One JSON object per op, no blank lines.
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), plan.ops.len());
+    }
+
+    #[test]
+    fn committed_index_lags_by_the_buffer_depth() {
+        // Variant A: we know the move finished, so nothing lags.
+        assert_eq!(committed_index(100, 0), 100);
+        // Variant B: `ok` only meant queued, so trail by the planner depth.
+        assert_eq!(committed_index(100, PLANNER_BLOCKS), 85);
+        // Early on, fewer ops than the buffer → clamp to zero, never negative.
+        assert_eq!(committed_index(10, PLANNER_BLOCKS), 0);
+    }
+
+    #[test]
+    fn a_checkpoint_is_written_atomically_and_reads_back() {
+        let tmp = TempDir::new("progress");
+        let job = Job::create(&tmp.0, &sample_plan(), None).unwrap();
+        let writer = job.progress_writer();
+
+        writer.checkpoint(50, 100, [12.5, -3.0], true).unwrap();
+
+        let progress = read_progress(&job.dir).unwrap();
+        assert_eq!(progress.committed_index, 50 - PLANNER_BLOCKS);
+        assert_eq!(progress.total, 100);
+        assert_eq!(progress.pos, [12.5, -3.0]);
+        assert!(progress.pen_down);
+        assert!(progress.is_unfinished());
+
+        // No temp file is left behind by the rename.
+        assert!(!job.dir.join("progress.json.tmp").exists());
+    }
+
+    #[test]
+    fn checkpoints_overwrite_and_finish_marks_complete() {
+        let tmp = TempDir::new("finish");
+        let job = Job::create(&tmp.0, &sample_plan(), None).unwrap();
+        let writer = job.progress_writer();
+
+        writer.checkpoint(30, 100, [1.0, 2.0], false).unwrap();
+        writer.finish(100, [0.0, 0.0]).unwrap();
+
+        let progress = read_progress(&job.dir).unwrap();
+        assert_eq!(progress.committed_index, 100);
+        assert!(!progress.is_unfinished());
+        assert_eq!(progress.percent(), 100);
     }
 
     #[test]

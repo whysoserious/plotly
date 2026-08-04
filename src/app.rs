@@ -229,10 +229,15 @@ impl App {
         };
         tracing::info!(ops = plan.ops.len(), "starting plot");
 
-        // Persist the job so the print can be resumed after a crash (§3.1).
+        // Persist the job so the print can be resumed after a crash (§3.1),
+        // and hand the worker a checkpoint writer for progress.json (§3.2).
         self.job = self.create_job(plan);
+        let progress = self.job.as_ref().map(Job::progress_writer);
 
-        self.worker.send(Command::RunPlan(plan.clone()));
+        self.worker.send(Command::RunPlan {
+            plan: plan.clone(),
+            progress,
+        });
         // Arm the timed cutoff, if set, right after the plan starts (§2.8).
         if let Some(minutes) = self.stop_timer_minutes() {
             self.worker.send(Command::StopAfter {

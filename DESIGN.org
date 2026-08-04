@@ -692,7 +692,7 @@ od razu*. Zamiast tego:
 - [X] *3.1 Katalog jobu + zapis ~plan.jsonl~.* ~job.rs~ + ~directories~ (~data_dir~ na macOS —
   uwaga z sekcji 6!). /Test:/ start jobu tworzy katalog z ~plan.jsonl~ i ~meta.json~. /Auto:/
   U: ścieżka bazowa per-OS (mock ~ProjectDirs~); I: round-trip ~Plan~ → jsonl → ~Plan~ równe.
-- [ ] *3.2 ~progress.json~ atomowo + ~committed_index~.* Zapis temp+rename po każdej zmianie
+- [X] *3.2 ~progress.json~ atomowo + ~committed_index~.* Zapis temp+rename po każdej zmianie
   indeksu; znaczenie indeksu + korekta o bufor wg wariantu ze spike'u (sekcja 6). /Test:/
   ~--simulate~: ~progress.json~ rośnie w trakcie. /Auto:/ U: ~committed_index~ liczone poprawnie
   dla wariantu A i B (głębokość bufora); I: zapis jest atomowy (brak częściowego pliku po przerwaniu).
