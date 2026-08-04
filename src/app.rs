@@ -8,11 +8,11 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event as TermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
-use crate::job::{self, Job};
+use crate::job::{self, Job, Resumable};
 use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::Plan;
@@ -65,6 +65,11 @@ pub struct App {
     source: Option<String>,
     /// The job directory for the current print, created when it starts (§3.1).
     job: Option<Job>,
+    /// An unfinished job found at startup, prompting to resume (§3.3). While
+    /// `Some`, the resume overlay is shown and captures the next key.
+    resume: Option<Resumable>,
+    /// Op index to resume drawing from, set when a resume is accepted (§3.4).
+    resume_from: Option<usize>,
     /// Raw G-code console (step 1.5): `Some` while open, holding the typed line.
     console: Option<String>,
     /// Whether the key overview is covering the screen.
@@ -88,6 +93,7 @@ impl App {
         machine: MachineState,
         plan: Option<Plan>,
         source: Option<String>,
+        resume: Option<Resumable>,
         log: LogRing,
     ) -> Self {
         let estimate = plan
@@ -102,6 +108,8 @@ impl App {
             estimate,
             source,
             job: None,
+            resume,
+            resume_from: None,
             console: None,
             help: false,
             step_index: DEFAULT_STEP_INDEX,
@@ -193,6 +201,10 @@ impl App {
 
     /// Handle one key press; returns whether the screen has to be redrawn.
     fn on_key(&mut self, key: KeyEvent) -> bool {
+        // The resume prompt owns the keyboard until it is answered (§3.3).
+        if self.resume.is_some() {
+            return self.answer_resume(key);
+        }
         let Some(action) = action_for(self.mode(), &key) else {
             return false;
         };
@@ -248,6 +260,70 @@ impl App {
             Action::ToggleHelp => self.help = !self.help,
         }
         true
+    }
+
+    /// Answer the startup resume prompt: Enter resumes, `n`/Esc starts fresh.
+    /// Any other key is ignored so the choice is deliberate.
+    fn answer_resume(&mut self, key: KeyEvent) -> bool {
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        match key.code {
+            KeyCode::Enter => {
+                self.accept_resume();
+                true
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                tracing::info!("resume declined; starting fresh");
+                self.resume = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Load the resumable job's plan and mark where to continue from (§3.3).
+    /// The go-to-position drawing from that index is step 3.4.
+    fn accept_resume(&mut self) {
+        let Some(resumable) = self.resume.take() else {
+            return;
+        };
+        match job::read_job_plan(&resumable.dir) {
+            Ok(plan) => {
+                let committed = resumable.progress.committed_index;
+                tracing::info!(
+                    job = resumable.meta.job_id,
+                    from = committed,
+                    "resuming job"
+                );
+                self.estimate = Some((plan.total_distance_mm(), plan.estimated_secs()));
+                self.plan = Some(plan);
+                self.source = resumable.meta.source.clone();
+                self.job = Some(Job {
+                    id: resumable.meta.job_id,
+                    dir: resumable.dir.clone(),
+                });
+                self.resume_from = Some(committed);
+                self.note = Some(format!(
+                    "resume from {}% — press enter",
+                    resumable.percent()
+                ));
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not load the job to resume");
+                self.note = Some("could not load job to resume".to_owned());
+            }
+        }
+    }
+
+    /// The pending resume prompt, for the overlay.
+    pub fn resume_prompt(&self) -> Option<&Resumable> {
+        self.resume.as_ref()
+    }
+
+    /// Op index to resume drawing from, once accepted (consumed in step 3.4).
+    pub fn resume_from(&self) -> Option<usize> {
+        self.resume_from
     }
 
     /// Start drawing the loaded plan, if there is one, arming the safety timer.

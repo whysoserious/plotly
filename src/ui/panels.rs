@@ -111,6 +111,23 @@ fn row(binding: &Binding) -> String {
     format!("  {:<14}{}", binding.keys, binding.description)
 }
 
+/// Resume prompt shown at startup when an unfinished job is found (§3.3).
+pub fn resume_prompt(frame: &mut Frame, area: Rect, job: &crate::job::Resumable) {
+    let source = job.source().unwrap_or("(unknown source)");
+    let body = format!(
+        "Unfinished job found: {source}\n\
+         {}% done ({} / {} ops)\n\n\
+         [Enter] resume    [n] start fresh",
+        job.percent(),
+        job.progress.committed_index,
+        job.progress.total,
+    );
+    let popup = center(area, 60, 7);
+    let widget = Paragraph::new(body).block(Block::bordered().title(" Resume? "));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(widget, popup);
+}
+
 /// A centred rectangle of at most `width` x `height`, clamped to `area`.
 fn center(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])

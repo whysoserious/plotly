@@ -30,4 +30,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help_visible() {
         panels::help(frame, frame.area());
     }
+    if let Some(job) = app.resume_prompt() {
+        panels::resume_prompt(frame, frame.area(), job);
+    }
 }

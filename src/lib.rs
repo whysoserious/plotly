@@ -54,7 +54,22 @@ pub fn run() -> io::Result<()> {
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
     let source = args.svg_file.as_ref().map(|p| p.display().to_string());
-    run_tui(plotter::driver::Driver::new(connection), plan, source, log)
+    // Offer to resume an unfinished job found from a previous run (§3.3).
+    let resume = job::jobs_root().and_then(|root| job::latest_resumable(&root));
+    if let Some(candidate) = &resume {
+        tracing::info!(
+            job = candidate.meta.job_id,
+            percent = candidate.percent(),
+            "unfinished job found; offering resume"
+        );
+    }
+    run_tui(
+        plotter::driver::Driver::new(connection),
+        plan,
+        source,
+        resume,
+        log,
+    )
 }
 
 /// Log the loaded drawing, fit it to the field, and build the plan to draw.
@@ -111,6 +126,7 @@ fn run_tui(
     driver: plotter::driver::Driver,
     plan: Option<plan::Plan>,
     source: Option<String>,
+    resume: Option<job::Resumable>,
     log: logging::LogRing,
 ) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
@@ -127,5 +143,5 @@ fn run_tui(
     let worker = plotter::worker::Worker::spawn(driver);
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(worker, machine, plan, source, log).run(&mut terminal)
+    app::App::new(worker, machine, plan, source, resume, log).run(&mut terminal)
 }

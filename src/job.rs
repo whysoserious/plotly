@@ -175,6 +175,60 @@ pub fn read_progress(dir: &Path) -> io::Result<Progress> {
     serde_json::from_str(&text).map_err(invalid_data)
 }
 
+/// A job that stopped before the end and can be resumed (§6, step 3.3).
+#[derive(Debug, Clone)]
+pub struct Resumable {
+    pub dir: PathBuf,
+    pub meta: Meta,
+    pub progress: Progress,
+}
+
+impl Resumable {
+    pub fn percent(&self) -> u8 {
+        self.progress.percent()
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        self.meta.source.as_deref()
+    }
+}
+
+/// Scan `root` for jobs whose progress stopped short of the end, newest first.
+///
+/// A directory without a `progress.json` (nothing drawn yet) or a finished one
+/// is skipped; unreadable entries are ignored rather than failing the scan.
+pub fn scan(root: &Path) -> Vec<Resumable> {
+    let mut found: Vec<Resumable> = match fs::read_dir(root) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| resumable_at(&entry.path()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    // Most recently updated first — the likely one to resume.
+    found.sort_by_key(|r| std::cmp::Reverse(r.progress.updated_at_ms));
+    found
+}
+
+/// The newest resumable job under `root`, if any.
+pub fn latest_resumable(root: &Path) -> Option<Resumable> {
+    scan(root).into_iter().next()
+}
+
+/// A [`Resumable`] for `dir`, if it holds an unfinished job.
+fn resumable_at(dir: &Path) -> Option<Resumable> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let meta = read_meta(dir).ok()?;
+    let progress = read_progress(dir).ok()?;
+    progress.is_unfinished().then_some(Resumable {
+        dir: dir.to_path_buf(),
+        meta,
+        progress,
+    })
+}
+
 /// Write JSON to `path` atomically: to a sibling temp file, then rename over
 /// the target. A crash mid-write leaves either the old file or the new, never
 /// a half-written one (rename is atomic on a POSIX filesystem).
@@ -211,6 +265,11 @@ pub fn read_plan(path: &Path) -> io::Result<Plan> {
 pub fn read_meta(dir: &Path) -> io::Result<Meta> {
     let text = fs::read_to_string(dir.join(META_FILE))?;
     serde_json::from_str(&text).map_err(invalid_data)
+}
+
+/// Read a job's plan from its directory.
+pub fn read_job_plan(dir: &Path) -> io::Result<Plan> {
+    read_plan(&dir.join(PLAN_FILE))
 }
 
 /// Serialize `value` to a pretty JSON file.
@@ -326,6 +385,43 @@ mod tests {
         assert_eq!(progress.committed_index, 100);
         assert!(!progress.is_unfinished());
         assert_eq!(progress.percent(), 100);
+    }
+
+    #[test]
+    fn scan_offers_unfinished_jobs_and_skips_complete_ones() {
+        let tmp = TempDir::new("scan");
+        let plan = sample_plan();
+
+        // A finished job — not resumable.
+        let done = Job::create(&tmp.0, &plan, Some("done.svg")).unwrap();
+        done.progress_writer()
+            .finish(plan.ops.len(), [0.0, 0.0])
+            .unwrap();
+
+        // An unfinished job — resumable.
+        std::thread::sleep(std::time::Duration::from_millis(2)); // distinct id
+        let partial = Job::create(&tmp.0, &plan, Some("partial.svg")).unwrap();
+        partial
+            .progress_writer()
+            .checkpoint(30, plan.ops.len(), [1.0, 2.0], false)
+            .unwrap();
+
+        // A directory with no progress yet — not resumable.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _fresh = Job::create(&tmp.0, &plan, None).unwrap();
+
+        let resumable = scan(&tmp.0);
+        assert_eq!(resumable.len(), 1, "only the partial job resumes");
+        assert_eq!(resumable[0].dir, partial.dir);
+        assert_eq!(resumable[0].source(), Some("partial.svg"));
+
+        assert_eq!(latest_resumable(&tmp.0).unwrap().dir, partial.dir);
+    }
+
+    #[test]
+    fn scan_of_a_missing_root_is_empty_not_an_error() {
+        let missing = std::env::temp_dir().join("plotly-nope-does-not-exist-xyz");
+        assert!(scan(&missing).is_empty());
     }
 
     #[test]

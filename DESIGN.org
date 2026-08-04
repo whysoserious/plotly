@@ -697,7 +697,7 @@ od razu*. Zamiast tego:
   indeksu; znaczenie indeksu + korekta o bufor wg wariantu ze spike'u (sekcja 6). /Test:/
   ~--simulate~: ~progress.json~ rośnie w trakcie. /Auto:/ U: ~committed_index~ liczone poprawnie
   dla wariantu A i B (głębokość bufora); I: zapis jest atomowy (brak częściowego pliku po przerwaniu).
-- [ ] *3.3 Wykrycie i propozycja wznowienia.* Skan jobów przy starcie; jeśli ~committed_index
+- [X] *3.3 Wykrycie i propozycja wznowienia.* Skan jobów przy starcie; jeśli ~committed_index
   < total~ → prompt ~Resume job N (XX%)?~. /Test:/ ubij ~--simulate~ w połowie (~kill~),
   restart → pojawia się prompt. /Auto:/ I: katalog z częściowym progresem → ~Resume~ proponowane;
   kompletny → nie.
