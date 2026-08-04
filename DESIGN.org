@@ -428,6 +428,7 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
 | ~Enter~ | start rysowania wczytanego SVG |
 | ~t~ | timer bezpieczeństwa: off / 1 / 5 / 15 min (stop + pen up) — 2.8 |
+| ~m~ | stop po dystansie: off / 50 / 100 / 500 cm (stop + pen up) |
 | ~h~ | home (~$H~) |
 | ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
 | ~o~ | set origin (work offset) |

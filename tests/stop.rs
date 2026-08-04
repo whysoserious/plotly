@@ -208,6 +208,36 @@ fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
 }
 
 #[test]
+fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
+    let (mut worker, sent, _rt) = slow_worker();
+    let total = long_plan().ops.len();
+
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+    });
+    // The stroke is ~400 mm; stop after 100 mm of travel, pen up.
+    worker.send(Command::StopAfterDistance {
+        mm: 100.0,
+        pen_up: true,
+    });
+
+    let (end, done) = wait_for_end(&worker);
+    assert!(
+        matches!(end, Some(Event::Aborted)),
+        "expected a distance stop"
+    );
+    assert!(done < total, "stopped after {done} of {total} ops");
+
+    worker.shutdown();
+    let sent = sent.lock().unwrap();
+    assert!(
+        sent.iter().any(|l| l.contains("Z0.500")),
+        "no pen-up on the distance stop: {sent:?}"
+    );
+}
+
+#[test]
 fn a_zero_op_reference_keeps_the_helpers_honest() {
     // Guards the test's own assumptions: the plan really has many ops, and the
     // MoveTo lines map through the identity transform as expected.

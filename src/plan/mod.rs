@@ -99,7 +99,49 @@ impl Plan {
             .filter(|op| matches!(op, Op::MoveTo(_)))
             .count()
     }
+
+    /// Total XY travel distance, millimetres — every `MoveTo` segment, pen up
+    /// and down alike (the head still moves).
+    pub fn total_distance_mm(&self) -> f64 {
+        let mut pos = Point::new(0.0, 0.0);
+        let mut total = 0.0;
+        for op in &self.ops {
+            if let Op::MoveTo(p) = op {
+                total += (p.x - pos.x).hypot(p.y - pos.y);
+                pos = *p;
+            }
+        }
+        total
+    }
+
+    /// Rough print-time estimate in seconds, from each segment's feed plus a
+    /// small fixed cost per pen move. A planning aid, not a promise — it ignores
+    /// acceleration, so real prints run a little longer (a precise dry-run model
+    /// is step 5.3).
+    pub fn estimated_secs(&self) -> f64 {
+        let mut pos = Point::new(0.0, 0.0);
+        let mut feed_mm_min = 0.0_f64;
+        let mut secs = 0.0;
+        for op in &self.ops {
+            match op {
+                Op::SetFeed(f) => feed_mm_min = f64::from(*f),
+                Op::MoveTo(p) => {
+                    let dist = (p.x - pos.x).hypot(p.y - pos.y);
+                    if feed_mm_min > 0.0 {
+                        secs += dist / (feed_mm_min / 60.0);
+                    }
+                    pos = *p;
+                }
+                Op::PenUp | Op::PenDown => secs += PEN_MOVE_SECS,
+                Op::Dwell(s) => secs += *s,
+            }
+        }
+        secs
+    }
 }
+
+/// Fixed time charged per pen up/down, seconds (the Z move plus settle).
+const PEN_MOVE_SECS: f64 = 0.2;
 
 /// Push subdivided `MoveTo`s stepping from `from` through each of `points`.
 ///
@@ -231,5 +273,22 @@ mod tests {
         let plan = Plan::build(&[], &Placement::identity(), &PlanSettings::default());
         assert_eq!(plan.stroke_count(), 0);
         assert_eq!(plan.move_count(), 0);
+        // No travel; the only time is the initial pen-up (< 1 s).
+        assert_eq!(plan.total_distance_mm(), 0.0);
+        assert!(plan.estimated_secs() < 1.0);
+    }
+
+    #[test]
+    fn distance_and_time_estimate_a_known_line() {
+        // A single 100 mm stroke from the origin: travel 0 (starts at origin),
+        // then 100 mm drawn. Total distance is 100 mm.
+        let line = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
+        assert!((plan.total_distance_mm() - 100.0).abs() < 1e-6);
+
+        // 100 mm drawn at 2000 mm/min = 3 s, plus a pen down/up (~0.4 s). The
+        // travel to the start is zero-length here.
+        let secs = plan.estimated_secs();
+        assert!(secs > 3.0 && secs < 4.0, "estimate {secs}s out of range");
     }
 }

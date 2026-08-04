@@ -68,7 +68,7 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
     let mut done_seen = false;
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         match event {
-            Event::Progress { done, total } => progress.push((done, total)),
+            Event::Progress { done, total, .. } => progress.push((done, total)),
             Event::PlanDone => {
                 done_seen = true;
                 break;

@@ -51,6 +51,12 @@ pub enum Command {
         after: Duration,
         pen_up: bool,
     },
+    /// Stop the running plan once `mm` of travel is done, lifting the pen if
+    /// `pen_up`. A distance safety cutoff, sibling of [`Command::StopAfter`].
+    StopAfterDistance {
+        mm: f64,
+        pen_up: bool,
+    },
     /// Finish and let the thread exit.
     Shutdown,
 }
@@ -71,8 +77,14 @@ pub enum Event {
     Busy(String),
     /// An operation finished; carries the fresh machine snapshot (implies idle).
     State(MachineState),
-    /// Progress through the current plan, one per executed op.
-    Progress { done: usize, total: usize },
+    /// Progress through the current plan: ops done, distance travelled and time
+    /// elapsed so far. One per executed op.
+    Progress {
+        done: usize,
+        total: usize,
+        distance_mm: f64,
+        elapsed_secs: f64,
+    },
     /// The plan is paused (feed-hold) at `done`/`total`.
     Paused { done: usize, total: usize },
     /// The plan finished on its own.
@@ -196,6 +208,7 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
         Command::Pause
         | Command::Resume
         | Command::StopAfter { .. }
+        | Command::StopAfterDistance { .. }
         | Command::RunPlan { .. }
         | Command::Shutdown => ("", Ok(())),
     };
@@ -219,8 +232,13 @@ fn run_plan(
     let total = plan.ops.len();
     emit(events, Event::Busy("drawing".to_owned()));
 
-    // A timed safety cutoff, armed by `StopAfter` and checked each boundary.
+    // Safety cutoffs, armed mid-plan and checked each boundary: a deadline
+    // (`StopAfter`) and a travel budget in mm (`StopAfterDistance`).
     let mut cutoff: Option<(Instant, bool)> = None;
+    let mut distance_cutoff: Option<(f64, bool)> = None;
+    // Live metrics reported with each Progress event.
+    let started = Instant::now();
+    let mut distance_mm = 0.0_f64;
 
     for (index, op) in plan.ops.iter().enumerate() {
         // A stop/pause only has to land on an op boundary (short ops keep it
@@ -229,6 +247,10 @@ fn run_plan(
             Ok(Command::StopAfter { after, pen_up }) => {
                 tracing::info!(?after, pen_up, "timed stop armed");
                 cutoff = Some((Instant::now() + after, pen_up));
+            }
+            Ok(Command::StopAfterDistance { mm, pen_up }) => {
+                tracing::info!(mm, pen_up, "distance stop armed");
+                distance_cutoff = Some((distance_mm + mm, pen_up));
             }
             Ok(command) => {
                 match handle_interrupt(driver, command, index, total, commands, events) {
@@ -251,14 +273,23 @@ fn run_plan(
             Err(TryRecvError::Empty) => {}
         }
 
-        // The timer only has to fire by the next boundary after it elapses.
+        // Either cutoff only has to fire by the next boundary once it is due.
         if let Some(pen_up) = cutoff_fired(cutoff, Instant::now()) {
             tracing::info!(done = index, pen_up, "timed stop");
             stop_plan(driver, events, pen_up);
             checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(());
         }
+        if let Some((budget, pen_up)) = distance_cutoff {
+            if distance_mm >= budget {
+                tracing::info!(done = index, distance_mm, pen_up, "distance stop");
+                stop_plan(driver, events, pen_up);
+                checkpoint(progress, index, total, driver);
+                return ControlFlow::Continue(());
+            }
+        }
 
+        let before = driver.position();
         if let Err(err) = apply(driver, op) {
             tracing::error!(%err, done = index, "plan op failed");
             emit(events, Event::Error(err.to_string()));
@@ -266,8 +297,19 @@ fn run_plan(
             checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(());
         }
+        let after = driver.position();
+        distance_mm += (after.x - before.x).hypot(after.y - before.y);
+
         let sent = index + 1;
-        emit(events, Event::Progress { done: sent, total });
+        emit(
+            events,
+            Event::Progress {
+                done: sent,
+                total,
+                distance_mm,
+                elapsed_secs: started.elapsed().as_secs_f64(),
+            },
+        );
         checkpoint(progress, sent, total, driver);
     }
 

@@ -39,6 +39,8 @@ pub enum Action {
     StartPlot,
     /// Cycle the timed stop-and-pen-up safety cutoff (off / … / off).
     CycleStopTimer,
+    /// Cycle the distance stop-and-pen-up cutoff (off / … / off).
+    CycleStopDistance,
     /// Pause the running plan (feed-hold).
     Pause,
     /// Resume a paused plan.
@@ -98,6 +100,12 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         probe: Some(KeyCode::Char('t')),
         action: Action::CycleStopTimer,
         description: "safety timer: off / 1 / 5 / 15 min (stop + pen up)",
+    },
+    Binding {
+        keys: "m",
+        probe: Some(KeyCode::Char('m')),
+        action: Action::CycleStopDistance,
+        description: "distance stop: off / 50 / 100 / 500 cm (stop + pen up)",
     },
     Binding {
         keys: "[  /  PgUp",
@@ -228,6 +236,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
         KeyCode::Enter => Some(Action::StartPlot),
         KeyCode::Char('t') => Some(Action::CycleStopTimer),
+        KeyCode::Char('m') => Some(Action::CycleStopDistance),
         KeyCode::Esc => Some(Action::Pause),
         KeyCode::Char('r') => Some(Action::Resume),
         KeyCode::Char('S') => Some(Action::Stop),
@@ -383,6 +392,7 @@ mod tests {
             Action::StepBigger,
             Action::StartPlot,
             Action::CycleStopTimer,
+            Action::CycleStopDistance,
             Action::PenUp,
             Action::PenDown,
             Action::PenToggle,

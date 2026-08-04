@@ -32,12 +32,21 @@ const DEFAULT_STEP_INDEX: usize = 1;
 /// then back to off; an armed timer stops the plot and lifts the pen.
 const STOP_TIMER_MINUTES: [u64; 3] = [1, 5, 15];
 
+/// Distance-cutoff options cycled by `m`, in millimetres. Stops the plot and
+/// lifts the pen once that much travel is done.
+const STOP_DISTANCE_MM: [f64; 3] = [500.0, 1000.0, 5000.0];
+
 /// What the machine is doing, for the status bar. Derived from worker events.
 #[derive(Debug, Clone)]
 pub enum Activity {
     Idle,
     Busy(String),
-    Drawing { done: usize, total: usize },
+    Drawing {
+        done: usize,
+        total: usize,
+        distance_mm: f64,
+        elapsed_secs: f64,
+    },
 }
 
 /// Top-level TUI application state.
@@ -50,6 +59,8 @@ pub struct App {
     note: Option<String>,
     /// The plan built from the loaded SVG, if any; `Enter` draws it.
     plan: Option<Plan>,
+    /// Cached plan estimate: total travel (mm) and time (s), for the ETA.
+    estimate: Option<(f64, f64)>,
     /// Source SVG path, recorded in a job's metadata (§6).
     source: Option<String>,
     /// The job directory for the current print, created when it starts (§3.1).
@@ -62,6 +73,8 @@ pub struct App {
     step_index: usize,
     /// Armed safety timer as an index into [`STOP_TIMER_MINUTES`]; `None` = off.
     stop_timer: Option<usize>,
+    /// Armed distance cutoff as an index into [`STOP_DISTANCE_MM`]; `None` = off.
+    stop_distance: Option<usize>,
     /// Terminal events read ahead during jog coalescing, not yet handled.
     pending_events: VecDeque<TermEvent>,
     log: LogRing,
@@ -77,18 +90,23 @@ impl App {
         source: Option<String>,
         log: LogRing,
     ) -> Self {
+        let estimate = plan
+            .as_ref()
+            .map(|p| (p.total_distance_mm(), p.estimated_secs()));
         Self {
             worker,
             machine,
             activity: Activity::Idle,
             note: None,
             plan,
+            estimate,
             source,
             job: None,
             console: None,
             help: false,
             step_index: DEFAULT_STEP_INDEX,
             stop_timer: None,
+            stop_distance: None,
             pending_events: VecDeque::new(),
             last_log_len: log.len(),
             log,
@@ -149,8 +167,18 @@ impl App {
                     self.machine = machine;
                     self.activity = Activity::Idle;
                 }
-                Event::Progress { done, total } => {
-                    self.activity = Activity::Drawing { done, total }
+                Event::Progress {
+                    done,
+                    total,
+                    distance_mm,
+                    elapsed_secs,
+                } => {
+                    self.activity = Activity::Drawing {
+                        done,
+                        total,
+                        distance_mm,
+                        elapsed_secs,
+                    }
                 }
                 Event::Paused { done, total } => {
                     self.activity = Activity::Busy(format!("paused {done}/{total} (r resume)"));
@@ -197,6 +225,7 @@ impl App {
             Action::StepSmaller => self.step_index = self.step_index.saturating_sub(1),
             Action::StartPlot => self.start_plot(),
             Action::CycleStopTimer => self.cycle_stop_timer(),
+            Action::CycleStopDistance => self.cycle_stop_distance(),
             Action::OpenConsole => {
                 tracing::info!("raw G-code console open");
                 self.console = Some(String::new());
@@ -238,12 +267,16 @@ impl App {
             plan: plan.clone(),
             progress,
         });
-        // Arm the timed cutoff, if set, right after the plan starts (§2.8).
+        // Arm the safety cutoffs, if set, right after the plan starts (§2.8).
         if let Some(minutes) = self.stop_timer_minutes() {
             self.worker.send(Command::StopAfter {
                 after: Duration::from_secs(minutes * 60),
                 pen_up: true,
             });
+        }
+        if let Some(mm) = self.stop_distance_mm() {
+            self.worker
+                .send(Command::StopAfterDistance { mm, pen_up: true });
         }
     }
 
@@ -271,6 +304,29 @@ impl App {
             Some(m) => tracing::info!(minutes = m, "safety timer armed"),
             None => tracing::info!("safety timer off"),
         }
+    }
+
+    /// Cycle the distance cutoff: off → 0.5 → 1 → 5 m → off.
+    fn cycle_stop_distance(&mut self) {
+        self.stop_distance = match self.stop_distance {
+            None => Some(0),
+            Some(i) if i + 1 < STOP_DISTANCE_MM.len() => Some(i + 1),
+            Some(_) => None,
+        };
+        match self.stop_distance_mm() {
+            Some(mm) => tracing::info!(mm, "distance cutoff armed"),
+            None => tracing::info!("distance cutoff off"),
+        }
+    }
+
+    /// The armed distance cutoff in mm, if any.
+    pub fn stop_distance_mm(&self) -> Option<f64> {
+        self.stop_distance.map(|i| STOP_DISTANCE_MM[i])
+    }
+
+    /// Cached plan estimate `(total_distance_mm, estimated_secs)`, for the ETA.
+    pub fn estimate(&self) -> Option<(f64, f64)> {
+        self.estimate
     }
 
     /// The armed safety-timer duration in minutes, if any (for the status bar).
