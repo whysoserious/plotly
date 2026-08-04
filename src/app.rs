@@ -334,14 +334,18 @@ impl App {
         };
         tracing::info!(ops = plan.ops.len(), "starting plot");
 
-        // Persist the job so the print can be resumed after a crash (§3.1),
-        // and hand the worker a checkpoint writer for progress.json (§3.2).
-        self.job = self.create_job(plan);
+        // Resuming an accepted job continues its own directory from the
+        // committed index; a fresh plot starts a new job at 0 (§3.4).
+        let start_index = self.resume_from.take().unwrap_or(0);
+        if start_index == 0 {
+            self.job = self.create_job(plan);
+        }
         let progress = self.job.as_ref().map(Job::progress_writer);
 
         self.worker.send(Command::RunPlan {
             plan: plan.clone(),
             progress,
+            start_index,
         });
         // Arm the safety cutoffs, if set, right after the plan starts (§2.8).
         if let Some(minutes) = self.stop_timer_minutes() {

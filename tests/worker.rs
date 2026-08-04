@@ -61,6 +61,7 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
+        start_index: 0,
     });
 
     // Collect progress until the plan finishes.
@@ -124,6 +125,7 @@ fn a_y_zero_move_prints_without_negative_zero() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
+        start_index: 0,
     });
 
     // Wait for the plan to finish.
@@ -139,4 +141,80 @@ fn a_y_zero_move_prints_without_negative_zero() {
         sent.iter().any(|l| l == "G1 X10.000 Y0.000"),
         "sent lines: {sent:?}"
     );
+}
+
+#[test]
+fn resume_from_an_index_sends_only_the_remaining_ops_once() {
+    // A long stroke; resume from the middle. Ops before the index are not
+    // redrawn (except the resume preamble's travel move), and ops from the
+    // index are each sent exactly once.
+    let line = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+    let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
+    let total = plan.ops.len();
+    let start = total / 2;
+
+    // The MoveTo targets from `start` onward — what a resume should draw.
+    let remaining_moves: Vec<Point> = plan.ops[start..]
+        .iter()
+        .filter_map(|op| match op {
+            Op::MoveTo(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+
+    let (mut worker, sent) = worker_on_mock();
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+        start_index: start,
+    });
+
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if matches!(event, Event::PlanDone | Event::Aborted) {
+            break;
+        }
+    }
+    worker.shutdown();
+
+    let sent = sent.lock().unwrap();
+    // Homing happened as part of the resume preamble.
+    assert!(sent.iter().any(|l| l == "$H"), "resume did not re-home");
+
+    // Each remaining draw target appears (idempotent absolute moves); count the
+    // times the *last* target is sent — exactly once, never doubled.
+    let last = remaining_moves.last().unwrap();
+    let t = Transform::idraw();
+    let w = t.map_point(*last);
+    let line = format!("G1 X{:.3} Y{:.3}", w.x + 0.0, w.y + 0.0);
+    let hits = sent.iter().filter(|l| **l == line).count();
+    assert_eq!(hits, 1, "last op drawn {hits} times, want exactly once");
+}
+
+#[test]
+fn a_repeated_absolute_move_is_the_same_line_so_it_is_idempotent() {
+    // Sending the same absolute MoveTo twice yields identical G-code; on the
+    // board that is a no-op, which is what makes resume safe (§6).
+    let plan = Plan {
+        ops: vec![
+            Op::MoveTo(Point::new(42.0, 17.0)),
+            Op::MoveTo(Point::new(42.0, 17.0)),
+        ],
+    };
+    let (mut worker, sent) = worker_on_mock();
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+        start_index: 0,
+    });
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if matches!(event, Event::PlanDone) {
+            break;
+        }
+    }
+    worker.shutdown();
+
+    let sent = sent.lock().unwrap();
+    let moves: Vec<&String> = sent.iter().filter(|l| l.starts_with("G1 X")).collect();
+    assert_eq!(moves.len(), 2);
+    assert_eq!(moves[0], moves[1], "same target must be the same line");
 }

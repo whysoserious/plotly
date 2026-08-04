@@ -32,10 +32,13 @@ pub enum Command {
     },
     /// Send a raw line typed in the console.
     Raw(String),
-    /// Draw a whole plan, checkpointing progress through `progress` if given.
+    /// Draw a plan, checkpointing progress through `progress` if given. When
+    /// `start_index > 0` this is a resume: re-home, travel to the stop point,
+    /// restore the pen, then continue from that op (§3.4).
     RunPlan {
         plan: Plan,
         progress: Option<ProgressWriter>,
+        start_index: usize,
     },
     /// Panic abort: pen up, then soft reset (also aborts a running plan).
     EmergencyStop,
@@ -155,8 +158,20 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
             Command::Shutdown => break,
             // A plan can absorb a Shutdown between ops; when it does, honour it
             // here too instead of looping back to a `recv` that would block.
-            Command::RunPlan { plan, progress } => {
-                if run_plan(&mut driver, &plan, progress.as_ref(), commands, events).is_break() {
+            Command::RunPlan {
+                plan,
+                progress,
+                start_index,
+            } => {
+                let flow = run_plan(
+                    &mut driver,
+                    &plan,
+                    start_index,
+                    progress.as_ref(),
+                    commands,
+                    events,
+                );
+                if flow.is_break() {
                     break;
                 }
             }
@@ -225,11 +240,25 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
 fn run_plan(
     driver: &mut Driver,
     plan: &Plan,
+    start_index: usize,
     progress: Option<&ProgressWriter>,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
 ) -> ControlFlow<()> {
     let total = plan.ops.len();
+
+    // Resume: re-home to a firm origin, travel to the stop point and restore
+    // the pen before continuing from `start_index` (§6). Absolute coordinates
+    // make this safe — the ops we re-send land in exactly the same place.
+    if start_index > 0 {
+        emit(events, Event::Busy("resuming".to_owned()));
+        if let Err(err) = resume_to(driver, plan, start_index) {
+            tracing::error!(%err, "resume preamble failed");
+            emit(events, Event::Error(err.to_string()));
+            emit(events, Event::State(snapshot(driver)));
+            return ControlFlow::Continue(());
+        }
+    }
     emit(events, Event::Busy("drawing".to_owned()));
 
     // Safety cutoffs, armed mid-plan and checked each boundary: a deadline
@@ -240,7 +269,7 @@ fn run_plan(
     let started = Instant::now();
     let mut distance_mm = 0.0_f64;
 
-    for (index, op) in plan.ops.iter().enumerate() {
+    for (index, op) in plan.ops.iter().enumerate().skip(start_index) {
         // A stop/pause only has to land on an op boundary (short ops keep it
         // snappy). `index` is the count already drawn — the resume checkpoint.
         match commands.try_recv() {
@@ -324,6 +353,65 @@ fn run_plan(
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(())
 }
+
+/// Re-establish the machine at `start_index` before resuming: home, travel to
+/// the last drawn point with the pen up, then restore the pen and feed. The op
+/// at `start_index` runs normally afterwards, and since coordinates are
+/// absolute, re-sending it lands in the same place (§6, idempotent).
+fn resume_to(driver: &mut Driver, plan: &Plan, start_index: usize) -> Result<(), DriverError> {
+    let state = ResumeState::at(plan, start_index);
+    tracing::info!(
+        from = start_index,
+        x = state.pos.x,
+        y = state.pos.y,
+        pen_down = state.pen_down,
+        "resuming"
+    );
+
+    driver.home()?; // firm origin from the endstops (§2.4)
+    driver.pen_up()?;
+    driver.set_feed(RESUME_TRAVEL_FEED)?;
+    driver.move_to(state.pos)?; // travel to the stop point, pen up
+    if state.pen_down {
+        driver.pen_down()?;
+        if let Some(feed) = state.feed {
+            driver.set_feed(feed)?;
+        }
+    }
+    Ok(())
+}
+
+/// The machine state a plan reaches just before its op `index`: where the head
+/// is, whether the pen is down, and the active feed. Reconstructed by replaying
+/// the ops before `index` (they are absolute, so this is exact).
+struct ResumeState {
+    pos: Point,
+    pen_down: bool,
+    feed: Option<u32>,
+}
+
+impl ResumeState {
+    fn at(plan: &Plan, index: usize) -> Self {
+        let mut state = ResumeState {
+            pos: Point::new(0.0, 0.0),
+            pen_down: false,
+            feed: None,
+        };
+        for op in plan.ops.iter().take(index) {
+            match op {
+                Op::MoveTo(p) => state.pos = *p,
+                Op::PenDown => state.pen_down = true,
+                Op::PenUp => state.pen_down = false,
+                Op::SetFeed(f) => state.feed = Some(*f),
+                Op::Dwell(_) => {}
+            }
+        }
+        state
+    }
+}
+
+/// Feed for the pen-up approach travel when resuming, mm/min.
+const RESUME_TRAVEL_FEED: u32 = 5000;
 
 /// Atomically checkpoint progress, if a writer is attached. `sent` is the count
 /// of ops acknowledged; the writer lags it by the planner depth (§6).

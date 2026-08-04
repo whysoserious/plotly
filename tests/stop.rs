@@ -64,6 +64,7 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     std::thread::sleep(Duration::from_millis(20)); // let a few ops go out
     worker.send(Command::Stop);
@@ -92,6 +93,7 @@ fn pause_holds_then_resume_finishes_the_plan() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::Pause);
@@ -133,6 +135,7 @@ fn panic_stop_aborts_with_a_soft_reset() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::EmergencyStop);
@@ -157,6 +160,7 @@ fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     // Accelerated "time": a 30 ms cutoff, with pen-up. The plan (~150 ops at
     // 3 ms/read) runs well past it, so it stops partway.
@@ -185,6 +189,7 @@ fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     worker.send(Command::StopAfter {
         after: Duration::from_millis(30),
@@ -215,6 +220,7 @@ fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
+        start_index: 0,
     });
     // The stroke is ~400 mm; stop after 100 mm of travel, pen up.
     worker.send(Command::StopAfterDistance {

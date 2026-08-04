@@ -60,6 +60,7 @@ fn a_finished_plan_leaves_a_complete_progress_file() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
+        start_index: 0,
     });
 
     // Wait for completion.
@@ -89,6 +90,7 @@ fn a_stopped_plan_leaves_an_unfinished_checkpoint_to_resume_from() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
+        start_index: 0,
     });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::Stop);
