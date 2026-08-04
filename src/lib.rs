@@ -54,8 +54,14 @@ pub fn run() -> io::Result<()> {
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
     let source = args.svg_file.as_ref().map(|p| p.display().to_string());
-    // Offer to resume an unfinished job found from a previous run (§3.3).
-    let resume = job::jobs_root().and_then(|root| job::latest_resumable(&root));
+    // Offer to resume an unfinished job from a previous run (§3.3), but only
+    // when no SVG was given — asking to draw a file is not a resume, and the
+    // prompt must not sit in front of the machine controls.
+    let resume = if args.svg_file.is_none() {
+        job::jobs_root().and_then(|root| job::latest_resumable(&root))
+    } else {
+        None
+    };
     if let Some(candidate) = &resume {
         tracing::info!(
             job = candidate.meta.job_id,

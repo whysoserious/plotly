@@ -86,24 +86,32 @@ fn fmt_dist(mm: f64) -> String {
 }
 
 /// Key overview, drawn over everything else (step 1.5). Rows come straight
-/// from the key map, so the two cannot disagree.
+/// from the key map, so the two cannot disagree. The console shortcuts are
+/// folded into two lines so the whole list fits a short terminal.
 pub fn help(frame: &mut Frame, area: Rect) {
-    let mut lines = vec!["Navigation".to_owned()];
-    lines.extend(NAVIGATION_BINDINGS.iter().map(row));
+    let mut lines: Vec<String> = NAVIGATION_BINDINGS.iter().map(row).collect();
     lines.push(String::new());
-    lines.push("Raw G-code console (c)".to_owned());
-    lines.extend(CONSOLE_BINDINGS.iter().map(row));
-    lines.push("  everything else typed is sent as text".to_owned());
+    lines.push(format!("  console (c):  {}", console_summary()));
+    lines.push("  every other key in the console is typed as text".to_owned());
 
-    // Wide enough for the longest row (71 chars) plus the border; the helper
-    // clamps both dimensions to the terminal, so a small window still works.
+    // Wide enough for the longest row plus the border; the helper clamps both
+    // dimensions to the terminal, so a small window still works.
     let height = lines.len() as u16 + 2;
-    let popup = center(area, 76, height);
+    let popup = center(area, 78, height);
 
     let widget =
         Paragraph::new(lines.join("\n")).block(Block::bordered().title(" Keys (any key closes) "));
     frame.render_widget(Clear, popup);
     frame.render_widget(widget, popup);
+}
+
+/// The console shortcuts on one line, built from the console key map.
+fn console_summary() -> String {
+    CONSOLE_BINDINGS
+        .iter()
+        .map(|b| format!("{}={}", b.keys, b.description))
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 /// One `keys — description` line of the overview.
@@ -185,5 +193,38 @@ mod tests {
         assert!(line.contains("0:03 / ~0:12"), "{line}");
         assert!(line.contains("41.2cm"), "{line}");
         assert!(line.contains("1.24m"), "{line}");
+    }
+
+    /// The full key overview must fit a short (24-row) terminal without clipping
+    /// its last rows — the whole point of the compact layout.
+    #[test]
+    fn help_fits_a_short_terminal_without_clipping() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|f| help(f, f.area())).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // First and last navigation rows, and the console summary, all present.
+        assert!(screen.contains("jog XY"), "first row clipped:\n{screen}");
+        assert!(screen.contains("quit"), "last nav row clipped:\n{screen}");
+        assert!(
+            screen.contains("console (c)"),
+            "console line clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("home the machine"),
+            "home row missing:\n{screen}"
+        );
     }
 }

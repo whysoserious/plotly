@@ -36,6 +36,14 @@ const STOP_TIMER_MINUTES: [u64; 3] = [1, 5, 15];
 /// lifts the pen once that much travel is done.
 const STOP_DISTANCE_MM: [f64; 3] = [500.0, 1000.0, 5000.0];
 
+/// Outcome of a key press while the resume prompt is up.
+enum ResumeReply {
+    /// The prompt consumed the key (Enter/n/Esc or a release).
+    Handled,
+    /// The prompt was dismissed; the key should be handled normally.
+    Dismissed,
+}
+
 /// What the machine is doing, for the status bar. Derived from worker events.
 #[derive(Debug, Clone)]
 pub enum Activity {
@@ -208,12 +216,20 @@ impl App {
 
     /// Handle one key press; returns whether the screen has to be redrawn.
     fn on_key(&mut self, key: KeyEvent) -> bool {
-        // The resume prompt owns the keyboard until it is answered (§3.3).
+        // The resume prompt catches its own keys (Enter/n/Esc); any other key
+        // dismisses it and is then handled normally, so machine controls like
+        // `h` are never blocked behind a leftover prompt (§3.3).
+        let mut dismissed = false;
         if self.resume.is_some() {
-            return self.answer_resume(key);
+            match self.answer_resume(key) {
+                ResumeReply::Handled => return true,
+                ResumeReply::Dismissed => dismissed = true, // fall through
+            }
         }
         let Some(action) = action_for(self.mode(), &key) else {
-            return false;
+            // Dismissing the overlay changed the screen even if the key is
+            // otherwise unbound.
+            return dismissed;
         };
         // While the overview is up, any key dismisses it and does nothing else
         // — except quitting, which people expect to work from anywhere.
@@ -269,23 +285,28 @@ impl App {
         true
     }
 
-    /// Answer the startup resume prompt: Enter resumes, `n`/Esc starts fresh.
-    /// Any other key is ignored so the choice is deliberate.
-    fn answer_resume(&mut self, key: KeyEvent) -> bool {
+    /// Answer the startup resume prompt: Enter resumes, `n`/Esc declines. Any
+    /// other key also declines but is then handled normally (see [`on_key`]),
+    /// so the prompt never blocks the machine controls.
+    fn answer_resume(&mut self, key: KeyEvent) -> ResumeReply {
         if key.kind != KeyEventKind::Press {
-            return false;
+            return ResumeReply::Handled; // ignore key releases
         }
         match key.code {
             KeyCode::Enter => {
                 self.accept_resume();
-                true
+                ResumeReply::Handled
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 tracing::info!("resume declined; starting fresh");
                 self.resume = None;
-                true
+                ResumeReply::Handled
             }
-            _ => false,
+            _ => {
+                tracing::info!("resume dismissed by another key; starting fresh");
+                self.resume = None;
+                ResumeReply::Dismissed
+            }
         }
     }
 
@@ -519,5 +540,86 @@ fn jog_of(event: &TermEvent) -> Option<(i8, i8)> {
     match action_for(Mode::Navigation, key) {
         Some(Action::Jog { dx, dy }) => Some((dx, dy)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Placement, Point};
+    use crate::job::Job;
+    use crate::plan::{Plan, PlanSettings};
+    use crate::plotter::driver::{Driver, Pen};
+    use crate::plotter::mock::MockTransport;
+    use crate::plotter::Connection;
+    use crossterm::event::KeyModifiers;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// An app whose startup found an unfinished job, so the resume prompt is up.
+    fn app_with_resume_prompt() -> (App, Arc<Mutex<Vec<String>>>) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("plotly-app-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = Plan::build(
+            &[vec![Point::new(0.0, 0.0), Point::new(30.0, 0.0)]],
+            &Placement::identity(),
+            &PlanSettings::default(),
+        );
+        let job = Job::create(&root, &plan, Some("x.svg")).unwrap();
+        job.progress_writer()
+            .checkpoint(20, plan.ops.len(), [1.0, 2.0], false)
+            .unwrap();
+        let resumable = crate::job::latest_resumable(&root).unwrap();
+
+        let mock = MockTransport::new();
+        let sent = mock.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(mock),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+        };
+        let app = App::new(worker, machine, None, None, Some(resumable), LogRing::new());
+        (app, sent)
+    }
+
+    fn press(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn h_dismisses_the_resume_prompt_and_homes() {
+        let (mut app, sent) = app_with_resume_prompt();
+        assert!(app.resume_prompt().is_some(), "prompt should start visible");
+
+        let redraw = app.on_key(press('h'));
+
+        assert!(redraw);
+        assert!(app.resume_prompt().is_none(), "h should dismiss the prompt");
+        // The worker processes Home asynchronously; give it a moment.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            sent.lock().unwrap().iter().any(|l| l == "$H"),
+            "h did not reach homing: {:?}",
+            sent.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn enter_accepts_the_resume_instead_of_dismissing() {
+        let (mut app, _sent) = app_with_resume_prompt();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.resume_prompt().is_none(), "enter answers the prompt");
+        assert_eq!(app.resume_from(), Some(20 - crate::job::PLANNER_BLOCKS));
     }
 }

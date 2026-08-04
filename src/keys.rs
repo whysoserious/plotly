@@ -150,7 +150,7 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         description: "stop the plot, pen up",
     },
     Binding {
-        keys: "ctrl-c  /  ctrl-x",
+        keys: "ctrl-c/x",
         probe: None,
         action: Action::PanicStop,
         description: "panic: pen up + reset (works in the console too)",
@@ -196,7 +196,7 @@ pub const CONSOLE_BINDINGS: &[Binding] = &[
         description: "close the console",
     },
     Binding {
-        keys: "ctrl-c  /  ctrl-x",
+        keys: "ctrl-c/x",
         probe: None,
         action: Action::PanicStop,
         description: "panic: pen up + reset",
