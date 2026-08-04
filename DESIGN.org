@@ -706,7 +706,7 @@ od razu*. Zamiast tego:
   ~--resume-overlap K~. /Test:/ ✱ przerwij realny wydruk, wznów — rysunek *kontynuuje w tym
   samym miejscu* (bez przesunięcia/podwójnego rysowania). /Auto:/ U: idempotencja przy planie
   absolutnym (powtórzony ~MoveTo~ = no-op); I: resume od indeksu k wysyła op k..N raz.
-- [ ] *3.5 Obsługa sygnałów.* SIGINT/SIGTERM → graceful (pen-up, ~$SLP~, flush, zapis);
+- [X] *3.5 Obsługa sygnałów.* SIGINT/SIGTERM → graceful (pen-up, ~$SLP~, flush, zapis);
   SIGKILL ratuje zapis-po-op + re-home. /Test:/ ~kill -INT~ podczas ~--simulate~ → pióro w górę,
   log sflushowany, ~progress.json~ spójny. /Auto:/ I: handler ustawia stop i zapisuje stan.
 

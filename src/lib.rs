@@ -131,7 +131,7 @@ fn run_tui(
 ) -> io::Result<()> {
     let _guard = tui::TerminalGuard::enter()?;
     tui::install_panic_restore();
-    tui::install_signal_restore();
+    tui::install_signal_handler();
 
     // Snapshot the identity before the driver moves onto the worker thread.
     let machine = plotter::worker::MachineState {

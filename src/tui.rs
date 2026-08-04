@@ -3,6 +3,7 @@
 //! terminal is never left in a broken state. See DESIGN.org §4 / step 0.4.
 
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::terminal::{
@@ -60,17 +61,28 @@ pub fn install_panic_restore() {
     }));
 }
 
-/// Restore the terminal and exit on SIGINT/SIGTERM/SIGHUP (e.g. `kill -INT`),
-/// which would otherwise terminate the process without running [`Drop`].
+/// Set by the signal handler; polled by the app loop for a graceful exit.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a termination signal has asked the app to shut down (step 3.5).
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// Ask for a graceful shutdown (used by tests; the signal handler does the same).
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// On SIGINT/SIGTERM/SIGHUP (e.g. `kill -INT`), ask the app loop to stop rather
+/// than exiting outright: it then lifts the pen, releases the motors, writes a
+/// final progress checkpoint and restores the terminal — the graceful path of
+/// step 3.5. Just flipping an atomic here keeps the handler async-signal-safe.
 ///
 /// Keyboard Ctrl-C is delivered as a key event in raw mode (handled by
 /// [`crate::keys::action_for`]), so this only fires for external signals.
-pub fn install_signal_restore() {
-    let result = ctrlc::set_handler(|| {
-        restore();
-        // 128 + SIGINT(2); conventional exit code for signal termination.
-        std::process::exit(130);
-    });
+pub fn install_signal_handler() {
+    let result = ctrlc::set_handler(|| SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed));
     if let Err(err) = result {
         tracing::warn!(%err, "could not install signal handler");
     }

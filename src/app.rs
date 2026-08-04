@@ -17,7 +17,7 @@ use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::Plan;
 use crate::plotter::worker::{Command, Event, MachineState, Worker};
-use crate::ui;
+use crate::{tui, ui};
 
 /// Idle poll timeout: bounds how often we wake to pick up worker events and new
 /// log lines while keeping idle CPU negligible (we redraw only on a change).
@@ -127,6 +127,13 @@ impl App {
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
         let mut needs_redraw = true;
         while !self.should_quit {
+            // A termination signal (kill -INT/-TERM) asks for a graceful exit:
+            // fall out of the loop so the worker lifts the pen, releases the
+            // motors and checkpoints, and the terminal guard restores (§3.5).
+            if tui::shutdown_requested() {
+                tracing::info!("shutdown signal received; stopping");
+                break;
+            }
             if needs_redraw {
                 terminal.draw(|frame| ui::draw(frame, self))?;
                 needs_redraw = false;
