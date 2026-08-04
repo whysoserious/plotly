@@ -12,6 +12,14 @@ pub struct Args {
     #[arg(value_name = "SVG_FILE")]
     pub svg_file: Option<PathBuf>,
 
+    /// Write this text with the built-in single-stroke font instead of an SVG.
+    #[arg(long, value_name = "STRING")]
+    pub text: Option<String>,
+
+    /// Cap height for --text, in millimetres.
+    #[arg(long, value_name = "MM", default_value_t = 10.0)]
+    pub text_height: f64,
+
     /// Force the serial port path; default is auto-detect (CH340 1A86:7523/8040).
     #[arg(long, value_name = "PATH")]
     pub port: Option<String>,

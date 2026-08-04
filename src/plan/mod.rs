@@ -5,6 +5,7 @@
 //! (step 2.4) walks the plan and emits G-code.
 
 pub mod svg;
+pub mod text;
 
 use crate::geometry::{Placement, Point, Polyline};
 

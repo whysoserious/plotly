@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod fonts;
 pub mod geometry;
 pub mod job;
 pub mod keys;
@@ -32,12 +33,27 @@ pub fn run() -> io::Result<()> {
 
     // Load the drawing early (before touching hardware), so a broken SVG is
     // reported on a normal terminal, and build the plan to draw on `Enter`.
-    let plan = match &args.svg_file {
-        Some(path) => match plan::svg::load(path) {
-            Ok(svg) => Some(prepare_plan(path, &svg)),
-            Err(err) => return Err(fail("cannot load the SVG", err)),
-        },
-        None => None,
+    // Text (--text) and SVG feed the same pipeline (§7).
+    let plan = if let Some(text) = &args.text {
+        let polylines = plan::text::layout(text, args.text_height);
+        tracing::info!(%text, height_mm = args.text_height, strokes = polylines.len(), "text loaded");
+        Some(build_plan(&polylines))
+    } else {
+        match &args.svg_file {
+            Some(path) => match plan::svg::load(path) {
+                Ok(svg) => {
+                    tracing::info!(
+                        file = %path.display(),
+                        paths = svg.path_count(),
+                        points = svg.point_count(),
+                        "SVG loaded"
+                    );
+                    Some(build_plan(&svg.polylines))
+                }
+                Err(err) => return Err(fail("cannot load the SVG", err)),
+            },
+            None => None,
+        }
     };
 
     // Resolve and greet the plotter before entering the alternate screen, so
@@ -53,11 +69,15 @@ pub fn run() -> io::Result<()> {
     let connection =
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
-    let source = args.svg_file.as_ref().map(|p| p.display().to_string());
+    let source = match (&args.text, &args.svg_file) {
+        (Some(text), _) => Some(format!("text: {text}")),
+        (None, Some(path)) => Some(path.display().to_string()),
+        (None, None) => None,
+    };
     // Offer to resume an unfinished job from a previous run (§3.3), but only
-    // when no SVG was given — asking to draw a file is not a resume, and the
+    // when nothing to draw was given — a file or text is not a resume, and the
     // prompt must not sit in front of the machine controls.
-    let resume = if args.svg_file.is_none() {
+    let resume = if args.svg_file.is_none() && args.text.is_none() {
         job::jobs_root().and_then(|root| job::latest_resumable(&root))
     } else {
         None
@@ -78,17 +98,11 @@ pub fn run() -> io::Result<()> {
     )
 }
 
-/// Log the loaded drawing, fit it to the field, and build the plan to draw.
-/// Covers the DEBUG checks of §2.2/§2.3; execution is the worker (step 2.4).
-fn prepare_plan(path: &std::path::Path, svg: &plan::svg::Svg) -> plan::Plan {
-    tracing::info!(
-        file = %path.display(),
-        paths = svg.path_count(),
-        points = svg.point_count(),
-        "SVG loaded"
-    );
+/// Fit polylines (mm) to the field and build the plan to draw. Shared by SVG
+/// and text; covers the DEBUG checks of §2.2/§2.3 (execution is the worker).
+fn build_plan(polylines: &[geometry::Polyline]) -> plan::Plan {
     let field = geometry::Field::idraw_a0();
-    let placement = match svg.bounds_mm() {
+    let placement = match bounds_of(polylines) {
         Some(bounds) => {
             let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
             let (min, max) = placement.place_bounds(bounds);
@@ -105,7 +119,7 @@ fn prepare_plan(path: &std::path::Path, svg: &plan::svg::Svg) -> plan::Plan {
     };
 
     let settings = plan::PlanSettings::default();
-    let job = plan::Plan::build(&svg.polylines, &placement, &settings);
+    let job = plan::Plan::build(polylines, &placement, &settings);
     tracing::debug!(
         ops = job.ops.len(),
         strokes = job.stroke_count(),
@@ -114,6 +128,20 @@ fn prepare_plan(path: &std::path::Path, svg: &plan::svg::Svg) -> plan::Plan {
         "plan built"
     );
     job
+}
+
+/// Axis-aligned bounds of a set of polylines, or `None` when empty.
+fn bounds_of(polylines: &[geometry::Polyline]) -> Option<(geometry::Point, geometry::Point)> {
+    let mut points = polylines.iter().flatten();
+    let first = *points.next()?;
+    let (mut min, mut max) = (first, first);
+    for p in points {
+        min.x = min.x.min(p.x);
+        min.y = min.y.min(p.y);
+        max.x = max.x.max(p.x);
+        max.y = max.y.max(p.y);
+    }
+    Some((min, max))
 }
 
 /// Default margin left around the drawing when fitting to the field (mm).

@@ -711,7 +711,7 @@ od razu*. Zamiast tego:
   log sflushowany, ~progress.json~ spójny. /Auto:/ I: handler ustawia stop i zapisuje stan.
 
 ** Faza 4 — tryb pisania
-- [ ] *4.1 Hershey single-stroke → polilinie mm.* ~fonts/hershey.rs~: wbudowane dane +
+- [X] *4.1 Hershey single-stroke → polilinie mm.* ~fonts/hershey.rs~: wbudowane dane +
   parser; metryki mm (sekcja 7). ~plan/text.rs~ składa glify w polilinie mm (ten sam pipeline
   rysowania co SVG). /Test:/ ~--simulate~ napis „Hi" rysuje się jako ścieżki pióra.
   /Auto:/ U: glif → niepuste polilinie; wysokość cap = zadane mm (skala metryk).

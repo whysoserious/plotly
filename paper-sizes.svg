@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="843mm" height="1191mm" viewBox="-1 -1 843 1191">
+  <!-- A-series paper sizes (portrait, mm), nested from a shared top-left corner.
+       Each rectangle is the true size; each label sits in its bottom-right corner. -->
+  <g fill="none" stroke="black" stroke-width="0.75">
+    <rect x="0" y="0" width="841" height="1189"/> <!-- A0 -->
+    <rect x="0" y="0" width="594" height="841"/>  <!-- A1 -->
+    <rect x="0" y="0" width="420" height="594"/>  <!-- A2 -->
+    <rect x="0" y="0" width="297" height="420"/>  <!-- A3 -->
+    <rect x="0" y="0" width="210" height="297"/>  <!-- A4 -->
+    <rect x="0" y="0" width="148" height="210"/>  <!-- A5 -->
+    <rect x="0" y="0" width="105" height="148"/>  <!-- A6 -->
+  </g>
+  <g fill="black" font-family="sans-serif" text-anchor="end">
+    <text x="837" y="1185" font-size="24">A0</text>
+    <text x="590" y="837"  font-size="17">A1</text>
+    <text x="416" y="590"  font-size="12">A2</text>
+    <text x="293" y="416"  font-size="9">A3</text>
+    <text x="206" y="293"  font-size="7">A4</text>
+    <text x="144" y="206"  font-size="6">A5</text>
+    <text x="101" y="144"  font-size="5">A6</text>
+  </g>
+</svg>
