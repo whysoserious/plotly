@@ -800,7 +800,7 @@ od razu*. Zamiast tego:
   < total~ → prompt ~Resume job N (XX%)?~. /Test:/ ubij ~--simulate~ w połowie (~kill~),
   restart → pojawia się prompt. /Auto:/ I: katalog z częściowym progresem → ~Resume~ proponowane;
   kompletny → nie.
-- [ ] *3.4 ✱ Procedura wznawiania (~$H~ + transform).* ~$H~ → przelicz pozycję op
+- [X] *3.4 ✱ Procedura wznawiania (~$H~ + transform).* ~$H~ → przelicz pozycję op
   ~committed_index~ tym samym transformem (2.4) → pen-up dojazd → pen-down → kontynuuj; opcja
   ~--resume-overlap K~. /Test:/ ✱ przerwij realny wydruk, wznów — rysunek *kontynuuje w tym
   samym miejscu* (bez przesunięcia/podwójnego rysowania). /Auto:/ U: idempotencja przy planie
