@@ -166,6 +166,22 @@ kartki itp.) to nasz własny offset w ~geometry.rs~ — albo work offset G54, je
 wygodniejszy. Zanik prądu nadal wymaga ~$H~ (sekcja 6), ale ~0x18~ (soft reset) *pozycji nie
 gubi* (15.1).
 
+*C. Rysunek startuje POD PIÓREM, nie na środku pola (życzenie użytkownika).*
+~Placement::anchored_at~ kładzie *lewy górny róg bboxa rysunku na aktualnej pozycji głowicy*
+— dotąd ~Placement::fit~ centrowało go w polu, więc ploter odjeżdżał „gdzieś na środek A0"
+i rysował na gołym stole. Pole to całe A0 (841 × 1189), a kartka na nim jest zwykle dużo
+mniejsza, więc centrowanie było złym domyślnym.
+- Plan powstaje *dopiero przy ~Enter~* (~App::place_at_head~), z pozycji głowicy *w tej
+  chwili* — czyli: dojedź jogiem do rogu kartki, wciśnij ~Enter~, rysuje się stamtąd.
+  Przy starcie budowany jest tylko plan *podglądowy* (canvas i tak sam się skaluje do bboxa).
+- *Wznowienie NIE jest przekładane* — jedzie planem z ~plan.jsonl~, inaczej dorysowana część
+  wylądowałaby gdzie indziej niż narysowana.
+- Skala bez zmian: shrink-to-fit do pola, nigdy powiększanie. Kotwica *nie* jest wciskana
+  z powrotem w pole — jeśli rysunek z tego miejsca wystaje, leci ~WARN~ do logu (klip to
+  osobna robota hosta, punkt A powyżej).
+- To de facto realizuje „set origin" z kroku 5.4 w wersji bez osobnego klawisza: originem
+  jest tam, gdzie stoi głowica.
+
 * 3. Funkcje
 ** 3.1 MVP
 - [ ] Auto-wykrycie i połączenie z iDraw (CH340, handshake, wersja, status ~?~).

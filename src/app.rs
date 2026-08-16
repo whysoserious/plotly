@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use crate::job::{self, Job, Resumable};
 use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
-use crate::plan::Plan;
+use crate::plan::{Plan, Shape};
 use crate::plotter::worker::{Command, Event, MachineState, Worker};
 use crate::{tui, ui};
 
@@ -68,7 +68,11 @@ pub struct App {
     /// A pause was asked for and the plot is drawing out the current shape
     /// before it takes hold, for the status bar.
     pausing: bool,
-    /// The plan built from the loaded SVG, if any; `Enter` draws it.
+    /// The loaded drawing in drawing-logical mm, before placement. Kept so the
+    /// plan can be laid down afresh from wherever the head is when `Enter` is
+    /// pressed; empty when nothing was loaded.
+    shapes: Vec<Shape>,
+    /// The plan to draw, placed into machine coordinates; `Enter` draws it.
     plan: Option<Plan>,
     /// Cached plan estimate: total travel (mm) and time (s), for the ETA.
     estimate: Option<(f64, f64)>,
@@ -110,11 +114,14 @@ impl App {
     pub fn new(
         worker: Worker,
         machine: MachineState,
-        plan: Option<Plan>,
+        shapes: Vec<Shape>,
         source: Option<String>,
         resume: Option<Resumable>,
         log: LogRing,
     ) -> Self {
+        // A plan for the preview, laid down from where the head is now. It is
+        // rebuilt when the plot starts, so jogging first moves the drawing.
+        let plan = (!shapes.is_empty()).then(|| crate::build_plan(&shapes, machine.position));
         let estimate = plan
             .as_ref()
             .map(|p| (p.total_distance_mm(), p.estimated_secs()));
@@ -124,6 +131,7 @@ impl App {
             activity: Activity::Idle,
             note: None,
             pausing: false,
+            shapes,
             plan,
             estimate,
             source,
@@ -449,6 +457,13 @@ impl App {
 
     /// Start drawing the loaded plan, if there is one, arming the safety timer.
     fn start_plot(&mut self) {
+        // A fresh plot is laid down from where the head is *now*: jog to the
+        // corner of the sheet, press enter, and the drawing starts under the
+        // pen. A resume keeps the plan it was interrupted with — re-placing it
+        // would tear the drawing in two.
+        if self.resume_from.is_none() && !self.shapes.is_empty() {
+            self.place_at_head();
+        }
         // Cloned up front: the worker takes ownership of the plan, and the copy
         // the app keeps stays available for the preview and the stroke list.
         let Some(plan) = self.plan.clone() else {
@@ -485,6 +500,21 @@ impl App {
             self.worker
                 .send(Command::StopAfterDistance { mm, pen_up: true });
         }
+    }
+
+    /// Rebuild the plan with the drawing anchored at the head's position, and
+    /// refresh what the UI derives from it.
+    fn place_at_head(&mut self) {
+        let at = self.machine.position;
+        let plan = crate::build_plan(&self.shapes, at);
+        tracing::info!(
+            x = at.x,
+            y = at.y,
+            strokes = plan.stroke_count(),
+            "drawing placed at the head"
+        );
+        self.estimate = Some((plan.total_distance_mm(), plan.estimated_secs()));
+        self.plan = Some(plan);
     }
 
     /// Create the on-disk job for `plan`, or log why it could not be made.
@@ -693,12 +723,103 @@ mod tests {
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
         };
-        let app = App::new(worker, machine, None, None, Some(resumable), LogRing::new());
+        let app = App::new(
+            worker,
+            machine,
+            Vec::new(),
+            None,
+            Some(resumable),
+            LogRing::new(),
+        );
         (app, sent)
     }
 
     fn press(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn close(a: Point, b: Point) -> bool {
+        (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6
+    }
+
+    /// An app with a small drawing loaded and the head parked at the origin.
+    fn app_with_a_drawing() -> App {
+        let driver = Driver::new(Connection {
+            transport: Box::new(MockTransport::new()),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+        };
+        // The shape's first point is also its top-left corner, so "where the
+        // drawing starts" and "where its corner sits" are the same assertion.
+        let shapes = vec![Shape::unlabelled(vec![
+            Point::new(0.0, 0.0),
+            Point::new(20.0, 0.0),
+            Point::new(20.0, 10.0),
+        ])];
+        App::new(worker, machine, shapes, None, None, LogRing::new())
+    }
+
+    /// The drawing follows the head: jog to the corner of the sheet, press
+    /// enter, and the plot starts under the pen — not in the middle of the A0
+    /// field, which is where fitting used to centre it.
+    #[test]
+    fn the_plot_starts_where_the_head_is_after_a_jog() {
+        let mut app = app_with_a_drawing();
+        let field = crate::geometry::Field::idraw_a0();
+
+        let before = app.plan().expect("a preview plan").strokes[0].start;
+        assert!(
+            close(before, Point::new(0.0, 0.0)),
+            "the drawing should start at the head, not at {before:?}"
+        );
+
+        // Jog right a few steps and let the worker report the new position.
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        app.drain_worker_events();
+        let head = app.machine().position;
+        assert!(head.x > 0.0, "the jog never landed: {head:?}");
+
+        app.on_key(key(KeyCode::Enter));
+
+        let start = app.plan().expect("a plan to draw").strokes[0].start;
+        assert!(
+            close(start, head),
+            "the plot starts at {start:?}, not at the head {head:?}"
+        );
+        assert!(
+            start.x < field.width_mm / 4.0 && start.y < field.height_mm / 4.0,
+            "the drawing was centred in the field again: {start:?}"
+        );
+    }
+
+    /// A resume must draw the plan it was interrupted with. Re-placing it at
+    /// the head would leave the finished half and the rest in different places.
+    #[test]
+    fn resuming_keeps_the_original_placement() {
+        let (mut app, _sent) = app_with_resume_prompt();
+        app.on_key(key(KeyCode::Enter)); // accept the prompt
+        let resumed = app.plan().expect("the job's plan").clone();
+
+        app.on_key(key(KeyCode::Enter)); // start plotting
+        assert_eq!(
+            app.plan().expect("still the job's plan").strokes[0].start,
+            resumed.strokes[0].start,
+            "the resumed plan was moved to the head"
+        );
     }
 
     #[test]

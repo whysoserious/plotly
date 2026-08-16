@@ -32,14 +32,15 @@ pub fn run() -> io::Result<()> {
     }
 
     // Load the drawing early (before touching hardware), so a broken SVG is
-    // reported on a normal terminal, and build the plan to draw on `Enter`.
-    // Text (--text) and SVG feed the same pipeline (§7).
-    let plan = if let Some(text) = &args.text {
+    // reported on a normal terminal. The shapes are kept as drawing-logical mm
+    // and only turned into a plan on `Enter`, once the head is where the
+    // operator wants the drawing to start (§2.4). Text (--text) and SVG feed
+    // the same pipeline (§7).
+    let shapes = if let Some(text) = &args.text {
         let polylines = plan::text::layout(text, args.text_height);
         tracing::info!(%text, height_mm = args.text_height, strokes = polylines.len(), "text loaded");
         // Glyph strokes have no source element to name them.
-        let shapes: Vec<plan::Shape> = polylines.into_iter().map(plan::Shape::unlabelled).collect();
-        Some(build_plan(&shapes))
+        polylines.into_iter().map(plan::Shape::unlabelled).collect()
     } else {
         match &args.svg_file {
             Some(path) => match plan::svg::load(path) {
@@ -50,11 +51,11 @@ pub fn run() -> io::Result<()> {
                         points = svg.point_count(),
                         "SVG loaded"
                     );
-                    Some(build_plan(&svg.shapes))
+                    svg.shapes
                 }
                 Err(err) => return Err(fail("cannot load the SVG", err)),
             },
-            None => None,
+            None => Vec::new(),
         }
     };
 
@@ -94,28 +95,45 @@ pub fn run() -> io::Result<()> {
     }
     run_tui(
         plotter::driver::Driver::new(connection),
-        plan,
+        shapes,
         source,
         resume,
         log,
     )
 }
 
-/// Fit shapes (mm) to the field and build the plan to draw. Shared by SVG and
-/// text; covers the DEBUG checks of §2.2/§2.3 (execution is the worker).
-fn build_plan(shapes: &[plan::Shape]) -> plan::Plan {
+/// Build the plan to draw, with the shapes (mm) laid down from `at` — the
+/// head's current position. Shared by SVG and text; covers the DEBUG checks of
+/// §2.2/§2.3 (execution is the worker).
+///
+/// The drawing's top-left corner goes on `at` rather than the middle of the
+/// field: the operator jogs to the corner of their sheet and starts there.
+pub fn build_plan(shapes: &[plan::Shape], at: geometry::Point) -> plan::Plan {
     let field = geometry::Field::idraw_a0();
     let placement = match bounds_of(shapes) {
         Some(bounds) => {
-            let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
+            let placement = geometry::Placement::anchored_at(bounds, &field, DEFAULT_MARGIN_MM, at);
             let (min, max) = placement.place_bounds(bounds);
             tracing::debug!(
+                at_x = at.x,
+                at_y = at.y,
                 x0 = min.x,
                 y0 = min.y,
                 x1 = max.x,
                 y1 = max.y,
-                "placed bbox (mm) after fit to field"
+                "placed bbox (mm), anchored at the head"
             );
+            // Anchoring can push a drawing past the edge; say so rather than
+            // let the carriage find out. Bounds are the host's job (§2.4).
+            if !field.contains(min) || !field.contains(max) {
+                tracing::warn!(
+                    x1 = max.x,
+                    y1 = max.y,
+                    width_mm = field.width_mm,
+                    height_mm = field.height_mm,
+                    "the drawing runs off the field from here; move the head or it will hit the frame"
+                );
+            }
             placement
         }
         None => geometry::Placement::identity(),
@@ -136,7 +154,7 @@ fn build_plan(shapes: &[plan::Shape]) -> plan::Plan {
 }
 
 /// Axis-aligned bounds of a set of shapes, or `None` when empty.
-fn bounds_of(shapes: &[plan::Shape]) -> Option<(geometry::Point, geometry::Point)> {
+pub fn bounds_of(shapes: &[plan::Shape]) -> Option<(geometry::Point, geometry::Point)> {
     let mut points = shapes.iter().flat_map(|s| &s.points);
     let first = *points.next()?;
     let (mut min, mut max) = (first, first);
@@ -163,7 +181,7 @@ fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> 
 /// the TUI app against it.
 fn run_tui(
     driver: plotter::driver::Driver,
-    plan: Option<plan::Plan>,
+    shapes: Vec<plan::Shape>,
     source: Option<String>,
     resume: Option<job::Resumable>,
     log: logging::LogRing,
@@ -182,5 +200,5 @@ fn run_tui(
     let worker = plotter::worker::Worker::spawn(driver);
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(worker, machine, plan, source, resume, log).run(&mut terminal)
+    app::App::new(worker, machine, shapes, source, resume, log).run(&mut terminal)
 }

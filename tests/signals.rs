@@ -30,7 +30,7 @@ fn app_over_mock() -> (App, Arc<Mutex<Vec<String>>>) {
         pen: Pen::Up,
         position: Point::new(0.0, 0.0),
     };
-    let app = App::new(worker, machine, None, None, None, LogRing::new());
+    let app = App::new(worker, machine, Vec::new(), None, None, LogRing::new());
     (app, sent)
 }
 

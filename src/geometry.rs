@@ -80,22 +80,7 @@ impl Placement {
     pub fn fit(bounds: (Point, Point), field: &Field, margin_mm: f64) -> Self {
         let (min, max) = bounds;
         let (dw, dh) = (max.x - min.x, max.y - min.y);
-        let avail_w = (field.width_mm - 2.0 * margin_mm).max(0.0);
-        let avail_h = (field.height_mm - 2.0 * margin_mm).max(0.0);
-
-        // Constrain by each dimension that is actually present; a zero-extent
-        // axis (a horizontal or vertical line) imposes no limit of its own.
-        let sx = if dw > 0.0 {
-            avail_w / dw
-        } else {
-            f64::INFINITY
-        };
-        let sy = if dh > 0.0 {
-            avail_h / dh
-        } else {
-            f64::INFINITY
-        };
-        let scale = sx.min(sy).min(1.0);
+        let scale = fit_scale(bounds, field, margin_mm);
 
         // Centre the scaled drawing in the field.
         let offset = Point::new(
@@ -103,6 +88,28 @@ impl Placement {
             (field.height_mm - dh * scale) / 2.0 - min.y * scale,
         );
         Self { scale, offset }
+    }
+
+    /// Place a drawing with `bounds` so that its top-left corner lands on `at`,
+    /// at the same scale [`Placement::fit`] would choose.
+    ///
+    /// This is what "start drawing where the head is" means: the operator jogs
+    /// to the corner of their sheet and the drawing grows from there. Centring
+    /// in the field is the wrong default on this machine — the field is a whole
+    /// A0 (§15.1) and the paper on it is usually much smaller, so a centred
+    /// drawing lands on bare table.
+    ///
+    /// Nothing here keeps the result inside the field: an anchor near the far
+    /// edge can push the drawing off it. The caller checks and warns — clipping
+    /// is the host's job (§2.4) and belongs with the operator's own eyes on the
+    /// machine, not with a silent shrink.
+    pub fn anchored_at(bounds: (Point, Point), field: &Field, margin_mm: f64, at: Point) -> Self {
+        let scale = fit_scale(bounds, field, margin_mm);
+        let min = bounds.0;
+        Self {
+            scale,
+            offset: Point::new(at.x - min.x * scale, at.y - min.y * scale),
+        }
     }
 
     /// Map a drawing-logical point to a machine-logical point.
@@ -117,6 +124,29 @@ impl Placement {
     pub fn place_bounds(&self, bounds: (Point, Point)) -> (Point, Point) {
         (self.place(bounds.0), self.place(bounds.1))
     }
+}
+
+/// The scale that makes `bounds` fit `field` with `margin_mm` on each side,
+/// never enlarging: a drawing that already fits keeps its intended size.
+fn fit_scale(bounds: (Point, Point), field: &Field, margin_mm: f64) -> f64 {
+    let (min, max) = bounds;
+    let (dw, dh) = (max.x - min.x, max.y - min.y);
+    let avail_w = (field.width_mm - 2.0 * margin_mm).max(0.0);
+    let avail_h = (field.height_mm - 2.0 * margin_mm).max(0.0);
+
+    // Constrain by each dimension that is actually present; a zero-extent axis
+    // (a horizontal or vertical line) imposes no limit of its own.
+    let sx = if dw > 0.0 {
+        avail_w / dw
+    } else {
+        f64::INFINITY
+    };
+    let sy = if dh > 0.0 {
+        avail_h / dh
+    } else {
+        f64::INFINITY
+    };
+    sx.min(sy).min(1.0)
 }
 
 /// Linear part of the logical↔wire map (`L`) plus the machine origin: a point
@@ -301,6 +331,53 @@ mod tests {
         // Kept at 10×10 mm (scale 1), just moved to the centre.
         assert!((max.x - min.x - 10.0).abs() < 1e-6);
         assert!((max.y - min.y - 10.0).abs() < 1e-6);
+    }
+
+    /// The head is where the drawing starts: its top-left corner lands exactly
+    /// on the anchor, whatever the drawing's own coordinates were.
+    #[test]
+    fn anchoring_puts_the_drawings_corner_on_the_head() {
+        let field = Field::idraw_a0();
+        // Bounds that do not start at the origin, so an offset bug shows up.
+        let bounds = (Point::new(-30.0, 12.0), Point::new(70.0, 62.0));
+        let at = Point::new(120.0, 400.0);
+
+        let placement = Placement::anchored_at(bounds, &field, 5.0, at);
+        let (min, max) = placement.place_bounds(bounds);
+
+        assert!(close(min, at), "corner landed at {min:?}, not {at:?}");
+        // Unscaled, so the drawing keeps its 100 × 50 mm size.
+        assert!((max.x - min.x - 100.0).abs() < 1e-6);
+        assert!((max.y - min.y - 50.0).abs() < 1e-6);
+    }
+
+    /// Anchoring uses the same shrink-to-fit scale as centring, so an oversized
+    /// drawing is still plottable — it just starts at the head.
+    #[test]
+    fn anchoring_shrinks_an_oversized_drawing_like_fit_does() {
+        let field = Field::idraw_a0();
+        let bounds = (Point::new(0.0, 0.0), Point::new(1682.0, 0.0));
+        let at = Point::new(10.0, 20.0);
+
+        let anchored = Placement::anchored_at(bounds, &field, 5.0, at);
+        let centred = Placement::fit(bounds, &field, 5.0);
+        assert!((anchored.scale - centred.scale).abs() < 1e-12);
+
+        let (min, max) = anchored.place_bounds(bounds);
+        assert!(close(min, at));
+        assert!((max.x - min.x) <= field.width_mm - 10.0 + 1e-9);
+    }
+
+    /// Placement must not silently move a drawing back inside the field: an
+    /// anchor near the edge pushes it off, and the caller warns (§2.4).
+    #[test]
+    fn an_anchor_near_the_edge_leaves_the_drawing_hanging_off() {
+        let field = Field::idraw_a0();
+        let bounds = (Point::new(0.0, 0.0), Point::new(100.0, 100.0));
+        let at = Point::new(field.width_mm - 10.0, 0.0);
+
+        let (_, max) = Placement::anchored_at(bounds, &field, 5.0, at).place_bounds(bounds);
+        assert!(!field.contains(max), "expected {max:?} to be off the field");
     }
 
     #[test]
