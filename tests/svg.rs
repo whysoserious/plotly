@@ -9,8 +9,8 @@ fn loads_the_square_fixture_at_the_declared_millimetres() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/square.svg");
     let drawing = svg::load(&path).expect("the fixture must parse");
 
-    // One rect → one closed polyline.
-    assert_eq!(drawing.path_count(), 1);
+    // One rect → one closed shape.
+    assert_eq!(drawing.shape_count(), 1);
 
     // The rect is 30×20 mm at offset (5,5), so bounds are (5,5)–(35,25) mm.
     let (min, max) = drawing.bounds_mm().expect("non-empty drawing");

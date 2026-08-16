@@ -184,6 +184,8 @@ gubi* (15.1).
 - [ ] *Tryb interaktywny*: strzałki XY + dedykowane klawisze pen up/down (sekcja 8).
 - [ ] *Tryb pisania*: tekst, czcionka, rozmiar, bold; dostęp do czcionek systemowych;
   wysokość w mm; rozwiązanie problemu „nie każda czcionka nadaje się do rysowania" (sekcja 7).
+- [X] *Lista kształtów na żywo*: co już narysowane, ile ich jest w sumie i ile procent —
+  szczegóły w *3.7*.
 - [ ] Parytet z „iDraw 2.0 Control" (3.4) + pomysły z „AxiDraw Control" (3.5).
 
 ** 3.3 Logowanie i wznawianie (nowe — szczegóły w sekcjach 5 i 6)
@@ -217,6 +219,51 @@ gubi* (15.1).
 - [ ] *Kreator kalibracji pióra/Z*.
 - [ ] *Kolejka zadań* (wiele plików).
 - [ ] *Konsola surowego G-code* — wyślij dowolną komendę; świetne do debugowania na żywo.
+
+** 3.7 Postęp po kształtach — panel „Strokes" (życzenie użytkownika)
+*Nazewnictwo (rozstrzygnięte).* Jednostka „jednego kształtu" to *stroke* = jeden ciągły
+przejazd z piórem na dole (~PenDown~ → rysowanie → ~PenUp~). To jest to, co pojawia się na
+papierze jako jeden kształt, i dokładnie to, co ~Plan~ już liczył (~stroke_count~). Odrzucone:
+~path~ (myli się z ~<path>~ SVG, który daje *wiele* subpathów, czyli wiele stroke'ów),
+~contour~ (sugeruje kształt zamknięty), ~figure~ (nie mówi, że to jeden przejazd pióra).
+*Uwaga:* w SVG ~stroke~ to atrybut obrysu — w kodzie chodzi zawsze o przejazd pióra.
+
+*Model danych.* ~plan::Shape~ = geometria wejściowa + etykieta źródła (jeden ~Shape~ → jeden
+~Stroke~). ~plan::Stroke~ = ~{label, start_op, end_op, start, length_mm}~; ~Plan~ trzyma
+~Vec<Stroke>~ obok ~ops~.
+
+*Skąd się bierze postęp — bez zmian w workerze.* Stroke to *przedział op*, więc indeks op,
+który worker i tak raportuje (~Event::Progress{done}~), w zupełności wystarcza:
+~Plan::stroke_progress(ops_done)~ zwraca ~{done, total, current, drawn_mm, total_mm}~.
+Konsekwencja, której chcieliśmy: *wznowiony job dostaje poprawny licznik za darmo*, z
+~committed_index~ (6) — bez osobnego stanu i bez ryzyka rozjechania się z maszyną.
+
+*Dwie miary, bo się nie zgadzają.* 147 kropek i jeden długi obrys to „99% kształtów" przy
+kilku procentach kreski na papierze. Panel pokazuje *oba*: licznik kształtów (o to prosił
+użytkownik) i narysowane mm. Procent po mm jest uczciwszą odpowiedzią na „ile jeszcze".
+
+*Etykiety.* ~plan/svg.rs~ niesie ~id~ elementu, a gdy go nie ma — ~id~ najbliższej grupy
+(warstwy). Id generowane przez edytory (~path1234~, ~g8~, ~layer1~) są *odrzucane* — nic nie
+wnoszą ponad numer stroke'a. ~plan.jsonl~ trzyma same op, więc etykiety jadą w ~meta.json~
+(sparse ~(indeks, label)~), żeby wznowiony job nie stracił nazw.
+
+*UI.* Panel po prawej stronie canvasu (30 kolumn), klawisz ~s~ chowa/pokazuje; na wąskim
+terminalu canvas ma pierwszeństwo. Lista pokazuje *wszystkie* kształty ze statusem
+(~✔~ done / ~▶~ current / puste = pending) i auto-scrolluje za piórem. Log ~DEBUG~ dostaje
+linię, gdy licznik się ruszy — *koalescowaną do jednej paczki zdarzeń* (5: pełne logowanie
+ruchu tak, spam po każdym ~ok~ nie); przy okazji liczenie stroke'ów nie leci wtedy per op.
+
+#+begin_example
+┌ Strokes (s) ───────────────┐
+│strokes 2345/6312 (37%)     │
+│line 48.94m/160.89m (30%)   │
+│                            │
+│✔ #2344 outline      8.5mm  │
+│✔ #2345 outline      8.5mm  │
+│▶ #2346 outline      8.5mm  │
+│  #2347              8.5mm  │
+└────────────────────────────┘
+#+end_example
 
 * 4. Architektura
 Kluczowe wyzwanie: I/O szeregowe *blokuje*, a ruchy trwają realny czas. TUI musi pozostać
@@ -438,6 +485,7 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~r~ | resume (cycle-start =~= ✔ realtime) |
 | ~S~ | *STOP* planu + pen up (kooperatywnie między op) |
 | ~Ctrl-C~ / ~Ctrl-X~ | *panic STOP*: pen up + soft-reset ~0x18~ — zawsze aktywny, też w konsoli |
+| ~s~ | pokaż/ukryj listę kształtów (panel „Strokes" — 3.7) |
 | ~c~ | konsola surowego G-code |
 | ~q~ | quit (graceful; gasi silniki ~$SLP~ przy wyjściu) |
 
@@ -530,6 +578,7 @@ plotly/
 │   │   ├── mod.rs
 │   │   ├── canvas.rs      # braille toolpath + kursor pióra
 │   │   ├── panels.rs      # status, log panel, controls, file picker
+│   │   ├── strokes.rs     # lista kształtów: done/current/pending + % (3.7)
 │   │   └── theme.rs
 │   ├── plotter/
 │   │   ├── mod.rs         # Worker: pętla, Command/Event
@@ -688,6 +737,16 @@ od razu*. Zamiast tego:
   flaga → zadziała na granicy op. /Test:/ ~--simulate~: zadanie staje po ~T~ s (±długość op);
   z pen-up pióro w górze. /Auto:/ U: logika deadline (czy granica op po ~T~ wyzwala stop);
   I: na mocku z przyspieszonym „czasem".
+- [X] *2.9 Panel „Strokes" — lista kształtów na żywo* /(dodane po 4.1, na życzenie
+  użytkownika; model i decyzje: 3.7)/. ~plan/mod.rs~: ~Shape~ + ~Stroke~ + ~stroke_progress~;
+  ~plan/svg.rs~: etykiety z ~id~/grupy (śmieciowe id odrzucane); ~job.rs~: etykiety w
+  ~meta.json~, ~Plan::from_ops~ przy odczycie ~plan.jsonl~; ~ui/strokes.rs~ + klawisz ~s~.
+  *Worker bez zmian* — postęp liczony z indeksu op. /Test:/ ~--simulate <svg>~ → panel obok
+  canvasu pokazuje „strokes N/M (X%)", pozycje ✔/▶ lecą w trakcie rysowania, ~s~ chowa panel,
+  wąski terminal oddaje wiersz canvasowi. /Auto:/ U: ~stroke_progress~ (skończone / w trakcie /
+  mm, i że przejazd pen-up NIE liczy się jako kreska); okno auto-scrolla; format wiersza
+  (obcięcie długiej nazwy, dopasowanie do szerokości); render panelu na ~TestBackend~;
+  odrzucanie ~path1234~; I: etykiety przeżywają round-trip przez katalog jobu (resume).
 
 ** Faza 3 — trwałość i wznawianie
 - [X] *3.1 Katalog jobu + zapis ~plan.jsonl~.* ~job.rs~ + ~directories~ (~data_dir~ na macOS —

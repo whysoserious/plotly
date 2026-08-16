@@ -118,9 +118,7 @@ fn motors_are_released_on_shutdown() {
 #[test]
 fn a_y_zero_move_prints_without_negative_zero() {
     // Machine-logical (10, 0) → wire (10, -0.0); the line must read Y0.000.
-    let plan = Plan {
-        ops: vec![Op::MoveTo(Point::new(10.0, 0.0))],
-    };
+    let plan = Plan::from_ops(vec![Op::MoveTo(Point::new(10.0, 0.0))]);
     let (mut worker, sent) = worker_on_mock();
     worker.send(Command::RunPlan {
         plan,
@@ -194,12 +192,10 @@ fn resume_from_an_index_sends_only_the_remaining_ops_once() {
 fn a_repeated_absolute_move_is_the_same_line_so_it_is_idempotent() {
     // Sending the same absolute MoveTo twice yields identical G-code; on the
     // board that is a no-op, which is what makes resume safe (§6).
-    let plan = Plan {
-        ops: vec![
-            Op::MoveTo(Point::new(42.0, 17.0)),
-            Op::MoveTo(Point::new(42.0, 17.0)),
-        ],
-    };
+    let plan = Plan::from_ops(vec![
+        Op::MoveTo(Point::new(42.0, 17.0)),
+        Op::MoveTo(Point::new(42.0, 17.0)),
+    ]);
     let (mut worker, sent) = worker_on_mock();
     worker.send(Command::RunPlan {
         plan,

@@ -49,6 +49,8 @@ pub enum Action {
     Stop,
     /// Panic abort: pen up, then soft reset. Always active, even in the console.
     PanicStop,
+    /// Show or hide the stroke list.
+    ToggleStrokes,
     OpenConsole,
     CloseConsole,
     /// A character typed into the console.
@@ -156,6 +158,12 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         description: "panic: pen up + reset (works in the console too)",
     },
     Binding {
+        keys: "s",
+        probe: Some(KeyCode::Char('s')),
+        action: Action::ToggleStrokes,
+        description: "show/hide the stroke list",
+    },
+    Binding {
         keys: "c",
         probe: Some(KeyCode::Char('c')),
         action: Action::OpenConsole,
@@ -242,6 +250,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('S') => Some(Action::Stop),
         KeyCode::Char('h') => Some(Action::Home),
         KeyCode::Char('d') => Some(Action::DisableMotors),
+        KeyCode::Char('s') => Some(Action::ToggleStrokes),
         KeyCode::Char('c') => Some(Action::OpenConsole),
         KeyCode::Char('?') | KeyCode::F(1) => Some(Action::ToggleHelp),
         _ => None,
@@ -401,6 +410,7 @@ mod tests {
             Action::Pause,
             Action::Stop,
             Action::PanicStop,
+            Action::ToggleStrokes,
             Action::OpenConsole,
             Action::ToggleHelp,
             Action::Quit,

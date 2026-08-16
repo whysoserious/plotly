@@ -301,14 +301,12 @@ mod tests {
 
     #[test]
     fn a_horizontal_stroke_lights_a_whole_row_of_cells() {
-        let plan = Plan {
-            ops: vec![
-                Op::PenDown,
-                Op::MoveTo(Point::new(0.0, 5.0)),
-                Op::MoveTo(Point::new(10.0, 5.0)),
-                Op::PenUp,
-            ],
-        };
+        let plan = Plan::from_ops(vec![
+            Op::PenDown,
+            Op::MoveTo(Point::new(0.0, 5.0)),
+            Op::MoveTo(Point::new(10.0, 5.0)),
+            Op::PenUp,
+        ]);
         let b = plan_bounds(&plan).unwrap();
         let mut grid = Grid::new(10, 4);
         rasterise_strokes(&mut grid, &plan, b);

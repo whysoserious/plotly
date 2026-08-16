@@ -52,6 +52,12 @@ pub struct Meta {
     pub ops: usize,
     /// Creation time, Unix milliseconds.
     pub created_at_ms: u64,
+    /// Names of the drawing's strokes, as sparse `(stroke index, label)` pairs.
+    /// `plan.jsonl` holds ops only, so without these a resumed job would show
+    /// an anonymous stroke list. Defaulted, so jobs written before this existed
+    /// still load.
+    #[serde(default)]
+    pub stroke_labels: Vec<(usize, String)>,
 }
 
 /// A job directory on disk.
@@ -74,6 +80,7 @@ impl Job {
             source: source.map(str::to_owned),
             ops: plan.ops.len(),
             created_at_ms: id,
+            stroke_labels: plan.stroke_labels(),
         };
         write_json(&dir.join(META_FILE), &meta)?;
 
@@ -258,7 +265,8 @@ pub fn read_plan(path: &Path) -> io::Result<Plan> {
         }
         ops.push(serde_json::from_str::<Op>(&line).map_err(invalid_data)?);
     }
-    Ok(Plan { ops })
+    // The file holds ops only; the stroke index follows from them.
+    Ok(Plan::from_ops(ops))
 }
 
 /// Read a job's metadata.
@@ -267,9 +275,14 @@ pub fn read_meta(dir: &Path) -> io::Result<Meta> {
     serde_json::from_str(&text).map_err(invalid_data)
 }
 
-/// Read a job's plan from its directory.
+/// Read a job's plan from its directory, with its stroke names restored from
+/// `meta.json` (missing or older metadata just leaves them unnamed).
 pub fn read_job_plan(dir: &Path) -> io::Result<Plan> {
-    read_plan(&dir.join(PLAN_FILE))
+    let mut plan = read_plan(&dir.join(PLAN_FILE))?;
+    if let Ok(meta) = read_meta(dir) {
+        plan.apply_labels(&meta.stroke_labels);
+    }
+    Ok(plan)
 }
 
 /// Serialize `value` to a pretty JSON file.
@@ -439,5 +452,32 @@ mod tests {
         assert_eq!(meta.source.as_deref(), Some("logo.svg"));
 
         assert_eq!(read_plan(&job.dir.join(PLAN_FILE)).unwrap(), plan);
+    }
+
+    /// `plan.jsonl` is ops only, so a resumed job would otherwise lose the
+    /// names its stroke list shows. They ride along in `meta.json`.
+    #[test]
+    fn stroke_names_survive_a_resume() {
+        use crate::plan::Shape;
+
+        let tmp = TempDir::new("labels");
+        let plan = Plan::build_shapes(
+            &[Shape::new(
+                Some("outline".to_owned()),
+                vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
+            )],
+            &Placement::identity(),
+            &PlanSettings::default(),
+        );
+        let job = Job::create(&tmp.0, &plan, Some("logo.svg")).unwrap();
+
+        let reloaded = read_job_plan(&job.dir).unwrap();
+        assert_eq!(reloaded.strokes[0].label.as_deref(), Some("outline"));
+        assert_eq!(reloaded, plan);
+
+        // Bare `read_plan` still yields the same geometry, just unnamed.
+        let bare = read_plan(&job.dir.join(PLAN_FILE)).unwrap();
+        assert_eq!(bare.ops, plan.ops);
+        assert_eq!(bare.strokes[0].label, None);
     }
 }

@@ -37,18 +37,20 @@ pub fn run() -> io::Result<()> {
     let plan = if let Some(text) = &args.text {
         let polylines = plan::text::layout(text, args.text_height);
         tracing::info!(%text, height_mm = args.text_height, strokes = polylines.len(), "text loaded");
-        Some(build_plan(&polylines))
+        // Glyph strokes have no source element to name them.
+        let shapes: Vec<plan::Shape> = polylines.into_iter().map(plan::Shape::unlabelled).collect();
+        Some(build_plan(&shapes))
     } else {
         match &args.svg_file {
             Some(path) => match plan::svg::load(path) {
                 Ok(svg) => {
                     tracing::info!(
                         file = %path.display(),
-                        paths = svg.path_count(),
+                        shapes = svg.shape_count(),
                         points = svg.point_count(),
                         "SVG loaded"
                     );
-                    Some(build_plan(&svg.polylines))
+                    Some(build_plan(&svg.shapes))
                 }
                 Err(err) => return Err(fail("cannot load the SVG", err)),
             },
@@ -98,11 +100,11 @@ pub fn run() -> io::Result<()> {
     )
 }
 
-/// Fit polylines (mm) to the field and build the plan to draw. Shared by SVG
-/// and text; covers the DEBUG checks of §2.2/§2.3 (execution is the worker).
-fn build_plan(polylines: &[geometry::Polyline]) -> plan::Plan {
+/// Fit shapes (mm) to the field and build the plan to draw. Shared by SVG and
+/// text; covers the DEBUG checks of §2.2/§2.3 (execution is the worker).
+fn build_plan(shapes: &[plan::Shape]) -> plan::Plan {
     let field = geometry::Field::idraw_a0();
-    let placement = match bounds_of(polylines) {
+    let placement = match bounds_of(shapes) {
         Some(bounds) => {
             let placement = geometry::Placement::fit(bounds, &field, DEFAULT_MARGIN_MM);
             let (min, max) = placement.place_bounds(bounds);
@@ -119,20 +121,22 @@ fn build_plan(polylines: &[geometry::Polyline]) -> plan::Plan {
     };
 
     let settings = plan::PlanSettings::default();
-    let job = plan::Plan::build(polylines, &placement, &settings);
+    let job = plan::Plan::build_shapes(shapes, &placement, &settings);
     tracing::debug!(
         ops = job.ops.len(),
         strokes = job.stroke_count(),
         moves = job.move_count(),
+        labelled = job.stroke_labels().len(),
+        draw_mm = job.total_stroke_length_mm(),
         cap_mm = settings.max_segment_mm,
         "plan built"
     );
     job
 }
 
-/// Axis-aligned bounds of a set of polylines, or `None` when empty.
-fn bounds_of(polylines: &[geometry::Polyline]) -> Option<(geometry::Point, geometry::Point)> {
-    let mut points = polylines.iter().flatten();
+/// Axis-aligned bounds of a set of shapes, or `None` when empty.
+fn bounds_of(shapes: &[plan::Shape]) -> Option<(geometry::Point, geometry::Point)> {
+    let mut points = shapes.iter().flat_map(|s| &s.points);
     let first = *points.next()?;
     let (mut min, mut max) = (first, first);
     for p in points {

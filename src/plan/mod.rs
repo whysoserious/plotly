@@ -26,10 +26,97 @@ pub enum Op {
     Dwell(f64),
 }
 
-/// A whole job as a flat list of ops.
+/// Geometry to draw, tagged with where it came from: one polyline plus the
+/// label of the source element (an SVG `id`, a layer). Each shape becomes
+/// exactly one pen-down [`Stroke`] in the plan.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shape {
+    /// Source label, when the element had a usable one.
+    pub label: Option<String>,
+    pub points: Polyline,
+}
+
+impl Shape {
+    /// A shape whose source has no usable label (text mode, tests).
+    pub fn unlabelled(points: Polyline) -> Self {
+        Self {
+            label: None,
+            points,
+        }
+    }
+
+    pub fn new(label: Option<String>, points: Polyline) -> Self {
+        Self { label, points }
+    }
+}
+
+/// One pen-down run of the plan — pen down, draw, pen up.
+///
+/// This is the unit the progress panel counts ("12 of 148 drawn"): it is what
+/// actually appears on the paper as one shape, and it maps to a contiguous
+/// range of [`Op`]s, so the op index the worker reports is enough to say how
+/// many strokes are finished — no extra bookkeeping on the worker side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    /// Label of the source element, when it had a usable one.
+    pub label: Option<String>,
+    /// Index of the [`Op::PenDown`] that starts the stroke.
+    pub start_op: usize,
+    /// Index of the last op belonging to the stroke (its final [`Op::MoveTo`]).
+    pub end_op: usize,
+    /// Where the pen lands before drawing: the stroke's first point.
+    pub start: Point,
+    /// Drawn length in millimetres (pen-down only).
+    pub length_mm: f64,
+}
+
+/// A whole job as a flat list of ops, plus an index of its pen-down strokes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Plan {
     pub ops: Vec<Op>,
+    /// Pen-down runs in draw order. Everything but the labels is derived from
+    /// `ops`, so a plan read back from `plan.jsonl` rebuilds it ([`Plan::from_ops`]).
+    pub strokes: Vec<Stroke>,
+}
+
+/// How far a print has got, counted in [`Stroke`]s instead of ops.
+///
+/// Two measures, because they disagree: a drawing of 147 dots and one long
+/// outline is "99% of the strokes" while barely any of the line is on the
+/// paper. The stroke count answers "how many shapes are done", the millimetres
+/// answer "how much ink is down".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrokeProgress {
+    /// Strokes finished.
+    pub done: usize,
+    /// Strokes in the plan.
+    pub total: usize,
+    /// The stroke being drawn right now, if the pen is inside one.
+    pub current: Option<usize>,
+    /// Pen-down millimetres already drawn.
+    pub drawn_mm: f64,
+    /// Pen-down millimetres in the whole plan.
+    pub total_mm: f64,
+}
+
+impl StrokeProgress {
+    /// Percent of strokes finished. An empty plan counts as complete.
+    pub fn percent(&self) -> u8 {
+        percent(self.done as f64, self.total as f64)
+    }
+
+    /// Percent of the drawn line laid down.
+    pub fn percent_mm(&self) -> u8 {
+        percent(self.drawn_mm, self.total_mm)
+    }
+}
+
+/// `part / whole` as a percentage, clamped to 0–100; a zero whole is complete.
+fn percent(part: f64, whole: f64) -> u8 {
+    if whole <= 0.0 {
+        return 100;
+    }
+    (part / whole * 100.0).clamp(0.0, 100.0) as u8
 }
 
 /// Feeds and the subdivision cap used when building a plan. Defaults are the
@@ -57,40 +144,112 @@ impl Default for PlanSettings {
 }
 
 impl Plan {
-    /// Build a plan from drawing-logical polylines placed into the field.
-    ///
-    /// The pen starts up at the machine origin (where `$H` leaves it, §2.4).
-    /// For each polyline: travel to its start with the pen up, lower the pen,
-    /// draw its points, raise the pen. Long segments are subdivided.
+    /// Build a plan from bare polylines, with no source labels (text mode,
+    /// tests). See [`Plan::build_shapes`] for the labelled form.
     pub fn build(polylines: &[Polyline], placement: &Placement, settings: &PlanSettings) -> Self {
-        let mut ops = vec![Op::PenUp, Op::SetFeed(settings.travel_feed)];
-        // After homing the pen sits at the machine origin.
-        let mut cursor = Point::new(0.0, 0.0);
-
-        for polyline in polylines {
-            let placed: Polyline = polyline.iter().map(|p| placement.place(*p)).collect();
-            let Some(&start) = placed.first() else {
-                continue;
-            };
-
-            // Travel to the start with the pen up.
-            push_moves(&mut ops, cursor, &[start], settings.max_segment_mm);
-            ops.push(Op::PenDown);
-            ops.push(Op::SetFeed(settings.draw_feed));
-
-            // Draw the rest of the polyline.
-            push_moves(&mut ops, start, &placed[1..], settings.max_segment_mm);
-            cursor = *placed.last().unwrap_or(&start);
-
-            ops.push(Op::PenUp);
-            ops.push(Op::SetFeed(settings.travel_feed));
-        }
-        Self { ops }
+        assemble(
+            polylines.iter().map(|points| (None, points)),
+            placement,
+            settings,
+        )
     }
 
-    /// Number of pen-down strokes (polylines actually drawn).
+    /// Build a plan from labelled shapes placed into the field.
+    ///
+    /// The pen starts up at the machine origin (where `$H` leaves it, §2.4).
+    /// For each shape: travel to its start with the pen up, lower the pen,
+    /// draw its points, raise the pen. Long segments are subdivided.
+    pub fn build_shapes(shapes: &[Shape], placement: &Placement, settings: &PlanSettings) -> Self {
+        assemble(
+            shapes
+                .iter()
+                .map(|shape| (shape.label.as_deref(), &shape.points)),
+            placement,
+            settings,
+        )
+    }
+
+    /// Wrap a bare op list, rebuilding the stroke index from it.
+    ///
+    /// Used when a plan comes back from `plan.jsonl` (§6): the ops are the
+    /// source of truth, and everything about a stroke except its label follows
+    /// from them. Labels are restored separately by [`Plan::apply_labels`].
+    pub fn from_ops(ops: Vec<Op>) -> Self {
+        let strokes = index_strokes(&ops);
+        Self { ops, strokes }
+    }
+
+    /// Restore stroke labels saved alongside a job, as `(stroke index, label)`
+    /// pairs. Out-of-range indices are ignored, so an older job file cannot
+    /// break the load.
+    pub fn apply_labels(&mut self, labels: &[(usize, String)]) {
+        for (index, label) in labels {
+            if let Some(stroke) = self.strokes.get_mut(*index) {
+                stroke.label = Some(label.clone());
+            }
+        }
+    }
+
+    /// The labels of this plan's strokes, as sparse `(index, label)` pairs —
+    /// what [`Plan::apply_labels`] takes back.
+    pub fn stroke_labels(&self) -> Vec<(usize, String)> {
+        self.strokes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, stroke)| stroke.label.clone().map(|label| (i, label)))
+            .collect()
+    }
+
+    /// Number of pen-down strokes (shapes actually drawn).
     pub fn stroke_count(&self) -> usize {
-        self.ops.iter().filter(|op| **op == Op::PenDown).count()
+        self.strokes.len()
+    }
+
+    /// Total pen-down length in the plan, millimetres — the line that ends up
+    /// on the paper, without the pen-up travel between strokes.
+    pub fn total_stroke_length_mm(&self) -> f64 {
+        self.strokes.iter().map(|s| s.length_mm).sum()
+    }
+
+    /// How far the print has got, counted in strokes, given `ops_done` ops
+    /// executed. Cheap enough to call every render: one pass over the strokes
+    /// plus a walk of the one stroke in progress.
+    pub fn stroke_progress(&self, ops_done: usize) -> StrokeProgress {
+        let mut progress = StrokeProgress {
+            done: 0,
+            total: self.strokes.len(),
+            current: None,
+            drawn_mm: 0.0,
+            total_mm: 0.0,
+        };
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            progress.total_mm += stroke.length_mm;
+            // Ops `0..ops_done` have run, so a stroke is finished once its last
+            // op is below that mark.
+            if stroke.end_op < ops_done {
+                progress.done += 1;
+                progress.drawn_mm += stroke.length_mm;
+            } else if stroke.start_op < ops_done && progress.current.is_none() {
+                progress.current = Some(index);
+                progress.drawn_mm += self.partial_length_mm(stroke, ops_done);
+            }
+        }
+        progress
+    }
+
+    /// Millimetres drawn inside `stroke` after `ops_done` ops — the part of the
+    /// stroke in progress that is already on the paper.
+    fn partial_length_mm(&self, stroke: &Stroke, ops_done: usize) -> f64 {
+        let end = ops_done.min(stroke.end_op + 1);
+        let mut pos = stroke.start;
+        let mut drawn = 0.0;
+        for op in &self.ops[stroke.start_op..end] {
+            if let Op::MoveTo(p) = op {
+                drawn += (p.x - pos.x).hypot(p.y - pos.y);
+                pos = *p;
+            }
+        }
+        drawn
     }
 
     /// Number of [`Op::MoveTo`] ops.
@@ -143,6 +302,84 @@ impl Plan {
 
 /// Fixed time charged per pen up/down, seconds (the Z move plus settle).
 const PEN_MOVE_SECS: f64 = 0.2;
+
+/// Emit the ops for a sequence of `(label, polyline)` items and index the
+/// strokes they produce. The one place a plan is assembled — both
+/// [`Plan::build`] and [`Plan::build_shapes`] funnel through here.
+fn assemble<'a>(
+    items: impl IntoIterator<Item = (Option<&'a str>, &'a Polyline)>,
+    placement: &Placement,
+    settings: &PlanSettings,
+) -> Plan {
+    let mut ops = vec![Op::PenUp, Op::SetFeed(settings.travel_feed)];
+    // After homing the pen sits at the machine origin.
+    let mut cursor = Point::new(0.0, 0.0);
+    // Labels of the strokes emitted so far, in the same order as the strokes
+    // the index below finds.
+    let mut labels: Vec<Option<String>> = Vec::new();
+
+    for (label, polyline) in items {
+        let placed: Polyline = polyline.iter().map(|p| placement.place(*p)).collect();
+        let Some(&start) = placed.first() else {
+            continue;
+        };
+
+        // Travel to the start with the pen up.
+        push_moves(&mut ops, cursor, &[start], settings.max_segment_mm);
+        ops.push(Op::PenDown);
+        ops.push(Op::SetFeed(settings.draw_feed));
+
+        // Draw the rest of the polyline.
+        push_moves(&mut ops, start, &placed[1..], settings.max_segment_mm);
+        cursor = *placed.last().unwrap_or(&start);
+
+        ops.push(Op::PenUp);
+        ops.push(Op::SetFeed(settings.travel_feed));
+        labels.push(label.map(str::to_owned));
+    }
+
+    let mut strokes = index_strokes(&ops);
+    for (stroke, label) in strokes.iter_mut().zip(labels) {
+        stroke.label = label;
+    }
+    Plan { ops, strokes }
+}
+
+/// Find the pen-down runs in an op list: where each starts and ends, where the
+/// pen lands and how far it draws. Labels are not in the ops, so they come out
+/// empty here and are filled in by the caller.
+fn index_strokes(ops: &[Op]) -> Vec<Stroke> {
+    let mut strokes = Vec::new();
+    let mut pos = Point::new(0.0, 0.0);
+    let mut current: Option<Stroke> = None;
+
+    for (index, op) in ops.iter().enumerate() {
+        match op {
+            Op::PenDown => {
+                current = Some(Stroke {
+                    label: None,
+                    start_op: index,
+                    end_op: index,
+                    start: pos,
+                    length_mm: 0.0,
+                });
+            }
+            Op::PenUp => strokes.extend(current.take()),
+            Op::MoveTo(p) => {
+                if let Some(stroke) = &mut current {
+                    stroke.length_mm += (p.x - pos.x).hypot(p.y - pos.y);
+                    stroke.end_op = index;
+                }
+                pos = *p;
+            }
+            Op::SetFeed(_) | Op::Dwell(_) => {}
+        }
+    }
+    // A plan cut short mid-stroke still has that stroke; keep it rather than
+    // silently dropping geometry from the count.
+    strokes.extend(current);
+    strokes
+}
 
 /// Push subdivided `MoveTo`s stepping from `from` through each of `points`.
 ///
@@ -277,6 +514,108 @@ mod tests {
         // No travel; the only time is the initial pen-up (< 1 s).
         assert_eq!(plan.total_distance_mm(), 0.0);
         assert!(plan.estimated_secs() < 1.0);
+    }
+
+    /// Two 10 mm strokes, far apart so the travel between them is obvious.
+    fn two_stroke_plan() -> Plan {
+        let a = vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)];
+        let b = vec![Point::new(50.0, 0.0), Point::new(60.0, 0.0)];
+        Plan::build_shapes(
+            &[
+                Shape::new(Some("first".to_owned()), a),
+                Shape::unlabelled(b),
+            ],
+            &Placement::identity(),
+            &PlanSettings::default(),
+        )
+    }
+
+    #[test]
+    fn each_shape_becomes_one_stroke_carrying_its_label_and_length() {
+        let plan = two_stroke_plan();
+        assert_eq!(plan.stroke_count(), 2);
+
+        let first = &plan.strokes[0];
+        assert_eq!(first.label.as_deref(), Some("first"));
+        assert!((first.length_mm - 10.0).abs() < 1e-6, "{}", first.length_mm);
+        assert_eq!(first.start, Point::new(0.0, 0.0));
+        assert_eq!(plan.ops[first.start_op], Op::PenDown);
+        // The stroke ends on its last drawn point, before the closing pen-up.
+        assert_eq!(plan.ops[first.end_op], Op::MoveTo(Point::new(10.0, 0.0)));
+
+        assert_eq!(plan.strokes[1].label, None);
+        assert!((plan.total_stroke_length_mm() - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_progress_counts_finished_strokes_not_ops() {
+        let plan = two_stroke_plan();
+
+        // Nothing sent yet.
+        let start = plan.stroke_progress(0);
+        assert_eq!((start.done, start.total, start.current), (0, 2, None));
+        assert_eq!(start.percent(), 0);
+
+        // Halfway through the first stroke: none finished, one in progress,
+        // and half its line drawn.
+        // Pen down, set feed, then one of the two subdivided draw moves.
+        let mid = plan.strokes[0].start_op + 3;
+        let half = plan.stroke_progress(mid);
+        assert_eq!(half.done, 0);
+        assert_eq!(half.current, Some(0));
+        assert!(half.drawn_mm > 0.0 && half.drawn_mm < 10.0, "{half:?}");
+
+        // Just past the first stroke's last op: one finished, 10 of 20 mm.
+        let after_first = plan.stroke_progress(plan.strokes[0].end_op + 1);
+        assert_eq!(after_first.done, 1);
+        assert_eq!(after_first.percent(), 50);
+        assert!((after_first.drawn_mm - 10.0).abs() < 1e-6);
+        assert_eq!(after_first.percent_mm(), 50);
+
+        // Every op executed: both strokes done, nothing in progress.
+        let end = plan.stroke_progress(plan.ops.len());
+        assert_eq!((end.done, end.current), (2, None));
+        assert_eq!(end.percent(), 100);
+        assert!((end.drawn_mm - end.total_mm).abs() < 1e-6);
+    }
+
+    /// The pen-up travel between strokes must not count as drawn line — that is
+    /// the whole difference between "how much ink is down" and total travel.
+    #[test]
+    fn travel_between_strokes_is_not_drawn_length() {
+        let plan = two_stroke_plan();
+        // 10 + 10 mm drawn, but 60 mm of head movement in total.
+        assert!((plan.total_stroke_length_mm() - 20.0).abs() < 1e-6);
+        assert!(plan.total_distance_mm() > 55.0);
+    }
+
+    /// A plan read back from `plan.jsonl` is ops only, so the stroke index has
+    /// to be rebuilt from them — and must match what `build` produced.
+    #[test]
+    fn from_ops_rebuilds_the_same_strokes_minus_labels() {
+        let plan = two_stroke_plan();
+        let mut rebuilt = Plan::from_ops(plan.ops.clone());
+        assert_eq!(rebuilt.strokes.len(), plan.strokes.len());
+        assert!(rebuilt.strokes.iter().all(|s| s.label.is_none()));
+
+        rebuilt.apply_labels(&plan.stroke_labels());
+        assert_eq!(rebuilt, plan);
+    }
+
+    #[test]
+    fn applying_labels_ignores_indices_that_do_not_exist() {
+        let mut plan = two_stroke_plan();
+        plan.apply_labels(&[(99, "ghost".to_owned())]);
+        assert_eq!(plan.stroke_count(), 2);
+    }
+
+    #[test]
+    fn an_empty_plan_reads_as_complete_rather_than_dividing_by_zero() {
+        let plan = Plan::build(&[], &Placement::identity(), &PlanSettings::default());
+        let progress = plan.stroke_progress(0);
+        assert_eq!(progress.total, 0);
+        assert_eq!(progress.percent(), 100);
+        assert_eq!(progress.percent_mm(), 100);
     }
 
     #[test]

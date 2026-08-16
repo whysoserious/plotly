@@ -78,10 +78,18 @@ pub struct App {
     resume: Option<Resumable>,
     /// Op index to resume drawing from, set when a resume is accepted (§3.4).
     resume_from: Option<usize>,
+    /// Ops of the plan executed so far — the anchor for stroke progress. Set
+    /// from worker events, from the resume point, and back to 0 on a fresh
+    /// start, so the stroke list agrees with the machine at all times.
+    ops_done: usize,
+    /// Strokes finished at the last update, to log each one exactly once.
+    strokes_done: usize,
     /// Raw G-code console (step 1.5): `Some` while open, holding the typed line.
     console: Option<String>,
     /// Whether the key overview is covering the screen.
     help: bool,
+    /// Whether the stroke list shares the canvas row.
+    strokes_panel: bool,
     /// Current jog step, as an index into [`JOG_STEPS_MM`].
     step_index: usize,
     /// Armed safety timer as an index into [`STOP_TIMER_MINUTES`]; `None` = off.
@@ -118,8 +126,11 @@ impl App {
             job: None,
             resume,
             resume_from: None,
+            ops_done: 0,
+            strokes_done: 0,
             console: None,
             help: false,
+            strokes_panel: true,
             step_index: DEFAULT_STEP_INDEX,
             stop_timer: None,
             stop_distance: None,
@@ -196,6 +207,9 @@ impl App {
                     distance_mm,
                     elapsed_secs,
                 } => {
+                    // Just the counter here: the stroke maths below runs once
+                    // per batch, not once per op.
+                    self.ops_done = done;
                     self.activity = Activity::Drawing {
                         done,
                         total,
@@ -204,14 +218,69 @@ impl App {
                     }
                 }
                 Event::Paused { done, total } => {
+                    self.ops_done = done;
                     self.activity = Activity::Busy(format!("paused {done}/{total} (r resume)"));
                 }
-                Event::PlanDone => self.note = Some("done".to_owned()),
+                Event::PlanDone => {
+                    if let Some(plan) = &self.plan {
+                        self.ops_done = plan.ops.len();
+                    }
+                    self.note = Some("done".to_owned());
+                }
                 Event::Aborted => self.note = Some("stopped".to_owned()),
                 Event::Error(err) => self.note = Some(format!("error: {err}")),
             }
         }
+        if changed {
+            self.log_strokes();
+        }
         changed
+    }
+
+    /// Move the plan counter and report the strokes that reached the paper.
+    fn set_ops_done(&mut self, ops_done: usize) {
+        self.ops_done = ops_done;
+        self.log_strokes();
+    }
+
+    /// Log the stroke counter whenever it moves.
+    ///
+    /// Called once per batch of worker events rather than per op: the board
+    /// acknowledges ops far faster than the UI redraws, and §5 asks for
+    /// coalesced progress instead of a line per acknowledgement. Counting the
+    /// strokes costs a pass over them, which is another reason not to do it on
+    /// every op.
+    fn log_strokes(&mut self) {
+        let Some(progress) = self.stroke_progress() else {
+            return;
+        };
+        if progress.done != self.strokes_done {
+            self.strokes_done = progress.done;
+            tracing::debug!(
+                strokes = progress.done,
+                total = progress.total,
+                percent = progress.percent(),
+                drawn_mm = progress.drawn_mm,
+                "strokes drawn"
+            );
+        }
+    }
+
+    /// Progress through the loaded plan counted in strokes, for the panel.
+    ///
+    /// Derived from the op index rather than reported by the worker: a stroke
+    /// is a range of ops, so the index the worker already sends is all it takes
+    /// (§3.7). One consequence worth having — a resumed job gets the right
+    /// stroke count for free, from its committed index.
+    pub fn stroke_progress(&self) -> Option<crate::plan::StrokeProgress> {
+        self.plan
+            .as_ref()
+            .map(|plan| plan.stroke_progress(self.ops_done))
+    }
+
+    /// Whether the stroke list is switched on (`s`).
+    pub fn strokes_visible(&self) -> bool {
+        self.strokes_panel
     }
 
     /// Handle one key press; returns whether the screen has to be redrawn.
@@ -261,6 +330,10 @@ impl App {
             Action::StartPlot => self.start_plot(),
             Action::CycleStopTimer => self.cycle_stop_timer(),
             Action::CycleStopDistance => self.cycle_stop_distance(),
+            Action::ToggleStrokes => {
+                self.strokes_panel = !self.strokes_panel;
+                tracing::info!(visible = self.strokes_panel, "stroke list");
+            }
             Action::OpenConsole => {
                 tracing::info!("raw G-code console open");
                 self.console = Some(String::new());
@@ -332,6 +405,10 @@ impl App {
                     dir: resumable.dir.clone(),
                 });
                 self.resume_from = Some(committed);
+                // Show the job where it actually stands: everything below the
+                // committed index is already on the paper.
+                self.strokes_done = 0;
+                self.set_ops_done(committed);
                 self.note = Some(format!(
                     "resume from {}% — press enter",
                     resumable.percent()
@@ -356,7 +433,9 @@ impl App {
 
     /// Start drawing the loaded plan, if there is one, arming the safety timer.
     fn start_plot(&mut self) {
-        let Some(plan) = &self.plan else {
+        // Cloned up front: the worker takes ownership of the plan, and the copy
+        // the app keeps stays available for the preview and the stroke list.
+        let Some(plan) = self.plan.clone() else {
             self.note = Some("no SVG loaded".to_owned());
             return;
         };
@@ -366,12 +445,16 @@ impl App {
         // committed index; a fresh plot starts a new job at 0 (§3.4).
         let start_index = self.resume_from.take().unwrap_or(0);
         if start_index == 0 {
-            self.job = self.create_job(plan);
+            self.job = self.create_job(&plan);
         }
+        // The stroke list starts from where this run starts, not from whatever
+        // the previous plan left behind.
+        self.strokes_done = 0;
+        self.set_ops_done(start_index);
         let progress = self.job.as_ref().map(Job::progress_writer);
 
         self.worker.send(Command::RunPlan {
-            plan: plan.clone(),
+            plan,
             progress,
             start_index,
         });
