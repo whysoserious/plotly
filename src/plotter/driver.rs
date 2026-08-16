@@ -340,7 +340,10 @@ impl Driver {
         self.command(&format!("G1 G90 Z{z:.3} F{}", self.settings.z_feed))?;
         self.command(&format!("G1 F{}", self.settings.xy_feed))?;
         self.pen = target;
-        tracing::info!(pen = %target, z, "pen moved");
+        // Debug, not info: a drawing raises and lowers the pen once per shape,
+        // which on a hatched plot is thousands of lines that would bury
+        // everything else in the log (§5).
+        tracing::debug!(pen = %target, z, "pen moved");
         Ok(())
     }
 
