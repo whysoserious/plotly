@@ -44,9 +44,11 @@ pub enum Command {
     EmergencyStop,
     /// Stop drawing the current plan (pen up), keep the connection.
     Stop,
-    /// Feed-hold the running plan (pause).
+    /// Pause the running plan. It takes effect at the end of the shape being
+    /// drawn: the plan's own closing pen-up runs first, so the hold leaves the
+    /// pen off the paper and no mark behind (§9).
     Pause,
-    /// Resume a paused plan.
+    /// Resume a paused plan — or call off a pause that has not engaged yet.
     Resume,
     /// Stop the running plan `after` has elapsed, lifting the pen if `pen_up`.
     /// A safety cutoff; acts on the next op boundary once the time is up (§9).
@@ -88,7 +90,10 @@ pub enum Event {
         distance_mm: f64,
         elapsed_secs: f64,
     },
-    /// The plan is paused (feed-hold) at `done`/`total`.
+    /// A pause was asked for mid-shape; the plan keeps drawing until the shape
+    /// ends. Sent so the UI can say why the plot has not stopped yet.
+    Pausing,
+    /// The plan is paused at `done`/`total`, pen up at a shape boundary.
     Paused { done: usize, total: usize },
     /// The plan finished on its own.
     PlanDone,
@@ -265,6 +270,8 @@ fn run_plan(
     // (`StopAfter`) and a travel budget in mm (`StopAfterDistance`).
     let mut cutoff: Option<(Instant, bool)> = None;
     let mut distance_cutoff: Option<(f64, bool)> = None;
+    // A pause asked for but not yet engaged — see the shape-boundary check below.
+    let mut pause_pending = false;
     // Live metrics reported with each Progress event.
     let started = Instant::now();
     let mut distance_mm = 0.0_f64;
@@ -281,25 +288,56 @@ fn run_plan(
                 tracing::info!(mm, pen_up, "distance stop armed");
                 distance_cutoff = Some((distance_mm + mm, pen_up));
             }
-            Ok(command) => {
-                match handle_interrupt(driver, command, index, total, commands, events) {
-                    Interrupt::Continue => {}
-                    Interrupt::Stopped => {
-                        checkpoint(progress, index, total, driver);
-                        return ControlFlow::Continue(());
-                    }
-                    Interrupt::Shutdown => {
-                        checkpoint(progress, index, total, driver);
-                        return ControlFlow::Break(());
+            Ok(Command::Pause) => {
+                if !pause_pending {
+                    pause_pending = true;
+                    if driver.pen() == Pen::Down {
+                        tracing::info!(done = index, "pause requested; finishing the shape first");
+                        emit(events, Event::Pausing);
                     }
                 }
             }
+            // Resume before the hold engages calls the pause off; the plot
+            // never stops and nothing on the paper knows about it.
+            Ok(Command::Resume) => {
+                if pause_pending {
+                    tracing::info!(done = index, "pause cancelled before the shape ended");
+                    pause_pending = false;
+                    emit(events, Event::Busy("drawing".to_owned()));
+                }
+            }
+            Ok(command) => match handle_interrupt(driver, command, index, total, events) {
+                Interrupt::Continue => {}
+                Interrupt::Stopped => {
+                    checkpoint(progress, index, total, driver);
+                    return ControlFlow::Continue(());
+                }
+                Interrupt::Shutdown => {
+                    checkpoint(progress, index, total, driver);
+                    return ControlFlow::Break(());
+                }
+            },
             Err(TryRecvError::Disconnected) => {
                 abort(driver, events);
                 checkpoint(progress, index, total, driver);
                 return ControlFlow::Break(());
             }
             Err(TryRecvError::Empty) => {}
+        }
+
+        // The pause engages only with the pen up. Asked for mid-shape it waits
+        // here, boundary after boundary, until the plan's own closing `PenUp`
+        // has run — so the shape is finished and the pen is off the paper
+        // before anything stops (user request; §9).
+        if pause_pending && driver.pen() == Pen::Up {
+            pause_pending = false;
+            // `hold` writes its own, exact checkpoint; checkpointing again on
+            // the way out would only push the committed index back.
+            match hold(driver, index, total, progress, commands, events) {
+                Interrupt::Continue => {}
+                Interrupt::Stopped => return ControlFlow::Continue(()),
+                Interrupt::Shutdown => return ControlFlow::Break(()),
+            }
         }
 
         // Either cutoff only has to fire by the next boundary once it is due.
@@ -424,6 +462,16 @@ fn checkpoint(progress: Option<&ProgressWriter>, sent: usize, total: usize, driv
     }
 }
 
+/// Checkpoint the exact op index reached, for a plan whose buffer is drained.
+fn commit_drained(progress: Option<&ProgressWriter>, index: usize, total: usize, driver: &Driver) {
+    let Some(writer) = progress else { return };
+    let pos = driver.position();
+    let pen_down = driver.pen() == Pen::Down;
+    if let Err(err) = writer.commit_drained(index, total, [pos.x, pos.y], pen_down) {
+        tracing::warn!(%err, "pause checkpoint failed");
+    }
+}
+
 /// Outcome of a command received mid-plan.
 enum Interrupt {
     /// Keep drawing.
@@ -434,15 +482,13 @@ enum Interrupt {
     Shutdown,
 }
 
-/// Act on a command that arrived between ops. Handles pause by blocking here
-/// until resume (or a stop), so `done`/`total` — the resume checkpoint — is
-/// preserved across the hold.
+/// Act on a command that arrived between ops. Pause is not handled here — it
+/// waits for a shape boundary, which only the plan loop can see.
 fn handle_interrupt(
     driver: &mut Driver,
     command: Command,
     done: usize,
     total: usize,
-    commands: &Receiver<Command>,
     events: &Sender<Event>,
 ) -> Interrupt {
     match command {
@@ -453,57 +499,58 @@ fn handle_interrupt(
         }
         Command::EmergencyStop => {
             tracing::warn!(done, total, "plan aborted (panic)");
-            if let Err(err) = driver.emergency_stop() {
-                tracing::warn!(%err, "emergency stop failed");
-            }
-            emit(events, Event::Aborted);
-            emit(events, Event::State(snapshot(driver)));
+            emergency_stop(driver, events);
             Interrupt::Stopped
         }
-        Command::Pause => pause(driver, done, total, commands, events),
         Command::Shutdown => {
             abort(driver, events);
             Interrupt::Shutdown
         }
-        // Resume with no hold, or anything else, is a no-op mid-plan.
+        // Anything else is a no-op mid-plan.
         _ => Interrupt::Continue,
     }
 }
 
-/// Feed-hold and block until resumed, stopped or shut down.
-fn pause(
+/// Hold a plan at a shape boundary and block until resumed, stopped or shut
+/// down. The pen is up here, so the hold can last as long as it likes without
+/// leaving a mark.
+///
+/// The checkpoint taken is the exact one, which is the whole point of pausing
+/// at a boundary: [`Driver::drain`] waits for the machine to really finish, so
+/// a resume — this session or after a restart — carries on with the next shape
+/// instead of redrawing the tail of the last one.
+fn hold(
     driver: &mut Driver,
     done: usize,
     total: usize,
+    progress: Option<&ProgressWriter>,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
 ) -> Interrupt {
-    if let Err(err) = driver.feed_hold() {
-        tracing::warn!(%err, "feed hold failed");
+    match driver.drain() {
+        Ok(()) => commit_drained(progress, done, total, driver),
+        Err(err) => {
+            tracing::warn!(%err, "could not drain before the hold; keeping the lagging checkpoint");
+        }
     }
-    tracing::info!(done, total, "plan paused");
+    tracing::info!(done, total, "plan paused at a shape boundary, pen up");
     emit(events, Event::Paused { done, total });
 
     while let Ok(command) = commands.recv() {
         match command {
             Command::Resume => {
-                if let Err(err) = driver.resume() {
-                    tracing::warn!(%err, "resume failed");
-                }
                 tracing::info!(done, total, "plan resumed");
                 emit(events, Event::Busy("drawing".to_owned()));
                 return Interrupt::Continue;
             }
             Command::Stop => {
+                tracing::info!(done, total, "paused plan stopped");
                 abort(driver, events);
                 return Interrupt::Stopped;
             }
             Command::EmergencyStop => {
-                if let Err(err) = driver.emergency_stop() {
-                    tracing::warn!(%err, "emergency stop failed");
-                }
-                emit(events, Event::Aborted);
-                emit(events, Event::State(snapshot(driver)));
+                tracing::warn!(done, total, "paused plan aborted (panic)");
+                emergency_stop(driver, events);
                 return Interrupt::Stopped;
             }
             Command::Shutdown => {
@@ -517,6 +564,15 @@ fn pause(
     // Channel closed while paused.
     abort(driver, events);
     Interrupt::Shutdown
+}
+
+/// Pen up and soft reset, reporting the abort.
+fn emergency_stop(driver: &mut Driver, events: &Sender<Event>) {
+    if let Err(err) = driver.emergency_stop() {
+        tracing::warn!(%err, "emergency stop failed");
+    }
+    emit(events, Event::Aborted);
+    emit(events, Event::State(snapshot(driver)));
 }
 
 /// Whether an armed cutoff has elapsed by `now`; yields its pen-up flag.

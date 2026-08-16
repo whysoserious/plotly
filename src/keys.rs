@@ -41,7 +41,7 @@ pub enum Action {
     CycleStopTimer,
     /// Cycle the distance stop-and-pen-up cutoff (off / … / off).
     CycleStopDistance,
-    /// Pause the running plan (feed-hold).
+    /// Pause the running plan once the shape being drawn is finished.
     Pause,
     /// Resume a paused plan.
     Resume,
@@ -143,7 +143,7 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         keys: "esc  /  r",
         probe: Some(KeyCode::Esc),
         action: Action::Pause,
-        description: "pause / resume the plot",
+        description: "pause after the current shape / resume",
     },
     Binding {
         keys: "S",

@@ -20,7 +20,15 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
             total,
             distance_mm,
             elapsed_secs,
-        } => drawing_line(*done, *total, *distance_mm, *elapsed_secs, app.estimate()),
+        } => {
+            let line = drawing_line(*done, *total, *distance_mm, *elapsed_secs, app.estimate());
+            // A pause waits for the shape to end, which on a long one takes a
+            // while; say so rather than look like the key was missed.
+            match app.pausing() {
+                true => format!("{line} · pausing after this shape"),
+                false => line,
+            }
+        }
     };
     let cutoffs = cutoffs_line(app);
     let note = app.note().map(|n| format!(" — {n}")).unwrap_or_default();

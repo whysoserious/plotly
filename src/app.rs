@@ -65,6 +65,9 @@ pub struct App {
     activity: Activity,
     /// A short note shown after a plan ends ("done", "stopped", …).
     note: Option<String>,
+    /// A pause was asked for and the plot is drawing out the current shape
+    /// before it takes hold, for the status bar.
+    pausing: bool,
     /// The plan built from the loaded SVG, if any; `Enter` draws it.
     plan: Option<Plan>,
     /// Cached plan estimate: total travel (mm) and time (s), for the ETA.
@@ -120,6 +123,7 @@ impl App {
             machine,
             activity: Activity::Idle,
             note: None,
+            pausing: false,
             plan,
             estimate,
             source,
@@ -196,7 +200,12 @@ impl App {
         while let Some(event) = self.worker.try_event() {
             changed = true;
             match event {
-                Event::Busy(label) => self.activity = Activity::Busy(label),
+                // Any fresh activity — including the "drawing" that follows a
+                // resume or a called-off pause — ends the pending pause.
+                Event::Busy(label) => {
+                    self.pausing = false;
+                    self.activity = Activity::Busy(label);
+                }
                 Event::State(machine) => {
                     self.machine = machine;
                     self.activity = Activity::Idle;
@@ -217,17 +226,24 @@ impl App {
                         elapsed_secs,
                     }
                 }
+                Event::Pausing => self.pausing = true,
                 Event::Paused { done, total } => {
+                    self.pausing = false;
                     self.ops_done = done;
-                    self.activity = Activity::Busy(format!("paused {done}/{total} (r resume)"));
+                    self.activity =
+                        Activity::Busy(format!("paused {done}/{total}, pen up (r resume)"));
                 }
                 Event::PlanDone => {
+                    self.pausing = false;
                     if let Some(plan) = &self.plan {
                         self.ops_done = plan.ops.len();
                     }
                     self.note = Some("done".to_owned());
                 }
-                Event::Aborted => self.note = Some("stopped".to_owned()),
+                Event::Aborted => {
+                    self.pausing = false;
+                    self.note = Some("stopped".to_owned());
+                }
                 Event::Error(err) => self.note = Some(format!("error: {err}")),
             }
         }
@@ -593,6 +609,11 @@ impl App {
 
     pub fn activity(&self) -> &Activity {
         &self.activity
+    }
+
+    /// Whether a pause is waiting for the current shape to finish.
+    pub fn pausing(&self) -> bool {
+        self.pausing
     }
 
     pub fn note(&self) -> Option<&str> {

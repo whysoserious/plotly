@@ -76,14 +76,15 @@ pub fn run() -> io::Result<()> {
         (None, Some(path)) => Some(path.display().to_string()),
         (None, None) => None,
     };
-    // Offer to resume an unfinished job from a previous run (§3.3), but only
-    // when nothing to draw was given — a file or text is not a resume, and the
-    // prompt must not sit in front of the machine controls.
-    let resume = if args.svg_file.is_none() && args.text.is_none() {
-        job::jobs_root().and_then(|root| job::latest_resumable(&root))
-    } else {
-        None
-    };
+    // Offer to resume an unfinished job from a previous run (§3.3). Started
+    // bare, any unfinished job qualifies. Started on a file or some text —
+    // the natural way to come back to a paused print is to repeat the command
+    // that began it — only a job made from that same source does, so asking
+    // for a different drawing never lands on someone else's leftovers.
+    let resume = job::jobs_root().and_then(|root| match &source {
+        Some(source) => job::latest_resumable_from(&root, source),
+        None => job::latest_resumable(&root),
+    });
     if let Some(candidate) = &resume {
         tracing::info!(
             job = candidate.meta.job_id,

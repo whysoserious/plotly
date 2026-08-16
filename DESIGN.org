@@ -399,9 +399,19 @@ checkpointy, płynny progress i czysty stop/wznowienie.
   segmentów (dziura w rysunku).
 Zapis ~progress.json~ atomowo po każdej zmianie ~committed_index~ (opcja perf: batch ≈250 ms).
 
+*Wyjątek — pauza (sekcja 9):* przy kontrolowanym wstrzymaniu na granicy kształtu bufor
+zostaje *opróżniony* (~Driver::drain~, ~G4~), więc nie trzeba niczego odejmować:
+~ProgressWriter::commit_drained~ zapisuje ~committed_index~ *dokładnie*. To jedyne miejsce,
+gdzie wiemy z pewnością, ile jest na papierze — i dlatego wznowienie po pauzie nie dorysowuje
+ponownie ani milimetra.
+
 ** Wykrycie i propozycja wznowienia
 Przy starcie skanuj joby; jeśli ~committed_index < total~ → w TUI:
 ~Resume job 7 (45%, logo.svg)? [Enter] resume  [n] new~.
+*Dopasowanie po źródle:* uruchomiony *bez argumentów* program proponuje dowolny niedokończony
+job; uruchomiony *na pliku/tekście* — tylko job o *tym samym* ~meta.source~
+(~job::latest_resumable_from~). Powrót do wstrzymanego wydruku to zwykle powtórzenie tej samej
+komendy, ale prośba o *inny* rysunek nie może trafić na cudze resztki.
 
 ** Procedura wznawiania (mocna dzięki homingowi iDraw)
 1. Połącz + handshake.
@@ -519,6 +529,20 @@ B zostaje jako opis awaryjny (np. gdyby ~!~ przestało wystarczać przy pełnym 
   która zadziała przy najbliższej granicy op (+ Z-up).
 
 W obu drogach po zatrzymaniu: zapis stanu (sekcja 6). Panic STOP — osobny skrót z sekcji 8.
+
+*Pauza — kooperatywna, na granicy kształtu (zmiana po 2.7, życzenie użytkownika).*
+Wstrzymanie *nie* jest realtime i celowo *nie* hamuje w połowie kreski:
+- ~Esc~ ustawia flagę. Pauza wchodzi *dopiero na granicy op, przy piórze w górze* — czyli po
+  zamykającym ~PenUp~ *aktualnie rysowanego kształtu*. Powód jest fizyczny: feed-hold w
+  połowie kreski zostawia pióro na papierze, a przy dłuższym postoju atrament się rozlewa i
+  wznowienie widać na rysunku. Kończymy kształt, podnosimy pióro, dopiero wtedy stoimy.
+- Zażądana w trakcie kreski → ~Event::Pausing~ (status: „pausing after this shape"), żeby
+  długi kształt nie wyglądał jak zgubiony klawisz. ~r~ *przed* wejściem pauzy ją *odwołuje*.
+- Po wejściu: ~Driver::drain~ (~G4~) czeka aż maszyna faktycznie skończy → *dokładny*
+  ~committed_index~ (sekcja 6) → wznowienie (~r~ albo po restarcie) startuje od *następnego*
+  kształtu. Pióro stoi w górze, więc postój może trwać dowolnie długo.
+- ~!~/=~= *nie są już używane* (usunięte z ~driver.rs~); fakty o nich zostają w 15.1 na wypadek,
+  gdyby kiedyś potrzebne było twarde zatrzymanie w ruchu.
 
 * 10. Profile maszyn (iDraw)
 Pole robocze (komplet z ~idraw2_0_conf.py~, ~model~ 1–4 + warianty travel):
@@ -849,5 +873,11 @@ pierwszy) — po połączeniu *jawnie* wysyłamy ~G21 G90~ i znany feed.
 - Zachowanie krańcówek *poza* ~$H~ przy ~$21=0~ (zgrzyt vs cokolwiek) — nie testowane celowo.
 - Głębokość bufora w praktyce (15 bloków) vs wybór streamingu: send→~ok~ (prostsze
   checkpointy — 6) vs character-counting (perf) — decyzja w Fazie 2.
+- *❓ ~G4~ jako synchronizacja* (~Driver::drain~, używane przez pauzę — sekcja 9). Zakładamy
+  standardowe zachowanie Grbla: ~G4~ wykonuje się dopiero po opróżnieniu bufora planera, więc
+  jego ~ok~ znaczy „wszystko wcześniejsze *narysowane*". Spike tego nie sprawdzał. Gdyby
+  firmware odpowiadał wcześniej, checkpoint pauzy byłby optymistyczny — nigdy niebezpieczny:
+  op są absolutne, więc ponowne wysłanie trafia w to samo miejsce. *Do weryfikacji na sprzęcie
+  razem z 3.4:* pauza → ~?~ powinno pokazać ~Idle~ zaraz po ~ok~ z ~G4~.
 - Obsługa ~error:<n>~/~ALARM~ w runtime, timeouty, retry, detekcja utraty USB w trakcie druku.
 - Czy ~$SLP~ gubi pozycję (po ~0x18~ jej nie gubi) — istotne dla wznawiania (6).

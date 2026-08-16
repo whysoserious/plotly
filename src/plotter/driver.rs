@@ -23,6 +23,11 @@ const JOG_FEED: u32 = 3000;
 /// (spike 0.7, §15.1), but a full-length seek from the far corner is slower.
 const HOMING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long [`Driver::drain`] may wait for the machine to finish what it has.
+/// The buffer holds 15 blocks (§15.1) of at most one subdivided segment each,
+/// so a couple of seconds is the real figure; this is slack around it.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Grbl realtime soft reset (Ctrl-X).
 const SOFT_RESET: u8 = 0x18;
 
@@ -195,19 +200,20 @@ impl Driver {
         Ok(())
     }
 
-    /// Feed-hold (`!`): pause motion, keeping position. Realtime, confirmed in
-    /// the spike (§15.1); no `ok` follows, so this just writes the byte.
-    pub fn feed_hold(&mut self) -> Result<(), DriverError> {
-        tracing::info!("feed hold");
-        self.connection.transport.write_realtime(b'!')?;
-        Ok(())
-    }
-
-    /// Cycle-start (`~`): resume after a feed-hold. Realtime, no `ok`.
-    pub fn resume(&mut self) -> Result<(), DriverError> {
-        tracing::info!("cycle start");
-        self.connection.transport.write_realtime(b'~')?;
-        Ok(())
+    /// Wait until everything already sent has actually been drawn.
+    ///
+    /// `ok` means "queued", not "drawn" (§15.1), so after the last line of a
+    /// shape the machine can still have a planner buffer of moves to make.
+    /// Grbl executes `G4` only once that buffer has emptied and answers `ok`
+    /// when the dwell is over, which makes it the standard way to ask "are you
+    /// really finished?".
+    ///
+    /// ❓ not exercised in spike 0.7 (§15.3). A firmware that answered early
+    /// would make a pause checkpoint optimistic, never unsafe: the ops in
+    /// question are absolute, so re-sending them lands in the same place.
+    pub fn drain(&mut self) -> Result<(), DriverError> {
+        tracing::debug!("draining the planner buffer");
+        self.command_within("G4 P0.01", DRAIN_TIMEOUT)
     }
 
     /// Jog by a logical delta in millimetres (right = +X, up the page = +Y).

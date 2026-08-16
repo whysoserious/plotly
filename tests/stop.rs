@@ -42,6 +42,21 @@ fn long_plan() -> Plan {
     Plan::build(&[line], &Placement::identity(), &PlanSettings::default())
 }
 
+/// Two long strokes, so a pause can land inside one and still leave a shape
+/// boundary — and a whole shape — ahead of it.
+fn two_shape_plan() -> Plan {
+    let a = vec![Point::new(0.0, 0.0), Point::new(400.0, 0.0)];
+    let b = vec![Point::new(0.0, 50.0), Point::new(400.0, 50.0)];
+    Plan::build(&[a, b], &Placement::identity(), &PlanSettings::default())
+}
+
+/// One stroke that starts far from the origin: the plan opens with a long
+/// pen-up travel, a wide window in which nothing is being drawn.
+fn distant_plan() -> Plan {
+    let line = vec![Point::new(200.0, 0.0), Point::new(400.0, 0.0)];
+    Plan::build(&[line], &Placement::identity(), &PlanSettings::default())
+}
+
 /// Drive events until one of the terminal outcomes, returning it and the last
 /// progress seen.
 fn wait_for_end(worker: &Worker) -> (Option<Event>, usize) {
@@ -86,44 +101,166 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
     );
 }
 
+/// Wait for the plan to report its hold, returning the op index it stopped at.
+fn wait_for_pause(worker: &Worker) -> usize {
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if let Event::Paused { done, .. } = event {
+            return done;
+        }
+    }
+    panic!("no Paused event");
+}
+
+/// Follow the plan's progress until `reached` accepts where it has got to.
+///
+/// Waiting on the plan's own state rather than on a sleep is what makes these
+/// tests deterministic: "pause while the pen is on the paper" is a fact about
+/// the plan, not about how fast the machine happens to be.
+fn wait_until(worker: &Worker, plan: &Plan, reached: impl Fn(usize) -> bool) -> usize {
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if let Event::Progress { done, .. } = event {
+            if reached(done) {
+                return done;
+            }
+        }
+    }
+    panic!(
+        "the plan ended before reaching the state under test ({} ops)",
+        plan.ops.len()
+    );
+}
+
+/// A pause asked for mid-shape must not stop there: the shape is drawn to its
+/// end and the pen lifted first, so the hold leaves no mark on the paper.
 #[test]
-fn pause_holds_then_resume_finishes_the_plan() {
-    let (mut worker, _sent, realtime) = slow_worker();
+fn pause_finishes_the_shape_being_drawn_before_holding() {
+    let (mut worker, _sent, _rt) = slow_worker();
+    let plan = two_shape_plan();
 
     worker.send(Command::RunPlan {
-        plan: long_plan(),
+        plan: plan.clone(),
         progress: None,
         start_index: 0,
     });
-    std::thread::sleep(Duration::from_millis(20));
+    // Ask only once the pen is provably on the paper, inside the first shape.
+    let asked_at = wait_until(&worker, &plan, |done| {
+        plan.stroke_progress(done).current == Some(0)
+    });
     worker.send(Command::Pause);
 
-    // The worker acknowledges the hold.
-    let mut paused_at = None;
-    while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if let Event::Paused { done, .. } = event {
-            paused_at = Some(done);
-            break;
-        }
-    }
-    let paused_at = paused_at.expect("no Paused event");
+    let paused_at = wait_for_pause(&worker);
 
-    // Feed-hold '!' was sent; the plan is not finished.
-    assert!(
-        realtime.lock().unwrap().contains(&b'!'),
-        "no feed-hold byte"
+    // No shape is half-drawn at the hold, and the op just executed was the
+    // pen-up that closes one.
+    let progress = plan.stroke_progress(paused_at);
+    assert_eq!(
+        progress.current, None,
+        "held inside a shape ({progress:?}) instead of at its end"
     );
+    assert_eq!(
+        plan.ops.get(paused_at - 1),
+        Some(&Op::PenUp),
+        "the op before the hold was not a shape's pen-up"
+    );
+    assert!(
+        paused_at > asked_at,
+        "held at {paused_at}, without drawing on from {asked_at}"
+    );
+    assert!(progress.done >= 1, "no shape finished: {progress:?}");
+    assert!(paused_at < plan.ops.len(), "the whole plan ran");
+
+    worker.shutdown();
+}
+
+/// A pause asked for with the pen already up holds there and then — there is no
+/// shape to finish.
+#[test]
+fn pause_with_the_pen_up_holds_at_once() {
+    let (mut worker, _sent, _rt) = slow_worker();
+    // The shape starts far from the origin, so the plan opens with a long
+    // pen-up travel: a wide, unambiguous window with nothing being drawn.
+    let plan = distant_plan();
+    let pen_down_at = plan
+        .ops
+        .iter()
+        .position(|op| *op == Op::PenDown)
+        .expect("the plan draws something");
+
+    worker.send(Command::RunPlan {
+        plan: plan.clone(),
+        progress: None,
+        start_index: 0,
+    });
+    wait_until(&worker, &plan, |done| done >= 3);
+    worker.send(Command::Pause);
+
+    let paused_at = wait_for_pause(&worker);
+    assert!(
+        paused_at < pen_down_at,
+        "held at {paused_at}, past the pen-down at {pen_down_at} — it waited for nothing"
+    );
+
+    worker.shutdown();
+}
+
+#[test]
+fn resume_after_a_pause_finishes_the_plan() {
+    let (mut worker, _sent, _rt) = slow_worker();
+    let plan = two_shape_plan();
+
+    worker.send(Command::RunPlan {
+        plan: plan.clone(),
+        progress: None,
+        start_index: 0,
+    });
+    wait_until(&worker, &plan, |done| {
+        plan.stroke_progress(done).current == Some(0)
+    });
+    worker.send(Command::Pause);
+    let paused_at = wait_for_pause(&worker);
 
     worker.send(Command::Resume);
     let (end, done) = wait_for_end(&worker);
 
     assert!(matches!(end, Some(Event::PlanDone)), "expected PlanDone");
     assert!(done >= paused_at, "progress went backwards after resume");
-    // Cycle-start '~' resumed motion.
-    assert!(
-        realtime.lock().unwrap().contains(&b'~'),
-        "no cycle-start byte"
-    );
+
+    worker.shutdown();
+}
+
+/// Resume sent before the shape ends calls the pause off: the plot runs to the
+/// end without ever holding.
+#[test]
+fn resume_before_the_shape_ends_calls_the_pause_off() {
+    let (mut worker, _sent, _rt) = slow_worker();
+    let plan = two_shape_plan();
+
+    worker.send(Command::RunPlan {
+        plan: plan.clone(),
+        progress: None,
+        start_index: 0,
+    });
+    wait_until(&worker, &plan, |done| {
+        plan.stroke_progress(done).current == Some(0)
+    });
+    worker.send(Command::Pause);
+    worker.send(Command::Resume);
+
+    let mut held = false;
+    let mut finished = false;
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        match event {
+            Event::Paused { .. } => held = true,
+            Event::PlanDone => {
+                finished = true;
+                break;
+            }
+            Event::Aborted => break,
+            _ => {}
+        }
+    }
+    assert!(finished, "the plan did not finish");
+    assert!(!held, "the cancelled pause still took hold");
 
     worker.shutdown();
 }

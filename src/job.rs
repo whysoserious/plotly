@@ -162,17 +162,34 @@ impl ProgressWriter {
         write_atomic(&self.path, &progress)
     }
 
-    /// Record the plan as fully drawn (`committed_index == total`).
-    pub fn finish(&self, total: usize, pos: [f64; 2]) -> io::Result<()> {
+    /// Record a checkpoint the machine has provably reached: `index` ops are
+    /// drawn, full stop.
+    ///
+    /// Only correct once the planner buffer has been drained — a clean pause at
+    /// a shape boundary (step 2.7). There the lag [`ProgressWriter::checkpoint`]
+    /// applies would send a resume back into the middle of a shape that is
+    /// already on the paper, so it is worth the wait to know exactly.
+    pub fn commit_drained(
+        &self,
+        index: usize,
+        total: usize,
+        pos: [f64; 2],
+        pen_down: bool,
+    ) -> io::Result<()> {
         let progress = Progress {
             job_id: self.job_id,
-            committed_index: total,
+            committed_index: index,
             total,
             pos,
-            pen_down: false,
+            pen_down,
             updated_at_ms: now_ms(),
         };
         write_atomic(&self.path, &progress)
+    }
+
+    /// Record the plan as fully drawn (`committed_index == total`).
+    pub fn finish(&self, total: usize, pos: [f64; 2]) -> io::Result<()> {
+        self.commit_drained(total, total, pos, false)
     }
 }
 
@@ -220,6 +237,17 @@ pub fn scan(root: &Path) -> Vec<Resumable> {
 /// The newest resumable job under `root`, if any.
 pub fn latest_resumable(root: &Path) -> Option<Resumable> {
     scan(root).into_iter().next()
+}
+
+/// The newest resumable job under `root` that came from `source`.
+///
+/// What makes restarting with the same command line a resume rather than a
+/// fresh start: `plotly drawing.svg` after a pause is the same intent as
+/// `plotly` alone, but a *different* file is a new drawing, not a resume.
+pub fn latest_resumable_from(root: &Path, source: &str) -> Option<Resumable> {
+    scan(root)
+        .into_iter()
+        .find(|job| job.source() == Some(source))
 }
 
 /// A [`Resumable`] for `dir`, if it holds an unfinished job.
@@ -429,6 +457,47 @@ mod tests {
         assert_eq!(resumable[0].source(), Some("partial.svg"));
 
         assert_eq!(latest_resumable(&tmp.0).unwrap().dir, partial.dir);
+    }
+
+    /// Restarting on the same file has to find the print it left off; asking
+    /// for a different one must not.
+    #[test]
+    fn a_job_resumes_only_under_the_source_it_came_from() {
+        let tmp = TempDir::new("by-source");
+        let plan = sample_plan();
+
+        let job = Job::create(&tmp.0, &plan, Some("logo.svg")).unwrap();
+        job.progress_writer()
+            .checkpoint(30, plan.ops.len(), [1.0, 2.0], false)
+            .unwrap();
+
+        assert_eq!(
+            latest_resumable_from(&tmp.0, "logo.svg").map(|r| r.dir),
+            Some(job.dir.clone()),
+            "the same file should offer to resume"
+        );
+        assert!(
+            latest_resumable_from(&tmp.0, "other.svg").is_none(),
+            "another drawing must not pick up this job"
+        );
+    }
+
+    /// A pause drains the machine first, so it can commit what is really drawn
+    /// rather than trailing the planner buffer.
+    #[test]
+    fn a_drained_commit_records_the_index_exactly() {
+        let tmp = TempDir::new("drained");
+        let job = Job::create(&tmp.0, &sample_plan(), None).unwrap();
+
+        job.progress_writer()
+            .commit_drained(42, 100, [5.0, 6.0], false)
+            .unwrap();
+
+        let progress = read_progress(&job.dir).unwrap();
+        assert_eq!(progress.committed_index, 42, "no planner-depth lag here");
+        assert_eq!(progress.pos, [5.0, 6.0]);
+        assert!(!progress.pen_down);
+        assert!(progress.is_unfinished());
     }
 
     #[test]
