@@ -851,7 +851,7 @@ od razu*. Zamiast tego:
   enumeracja zwraca niepustą listę; outline znanej czcionki → zamknięte kontury.
 
 ** Faza 5 — wykończenie
-- [ ] *5.1 Profile maszyn (TOML) + ~--profile~.* ~profiles.rs~/~config.rs~: pola z sekcji 10,
+- [X] *5.1 Profile maszyn (TOML) + ~--profile~.* ~profiles.rs~/~config.rs~: pola z sekcji 10,
   auto-odczyt z ~$$~ gdzie się da. /Test:/ ~--profile idraw-a3~ zmienia pole/limity. /Auto:/ U:
   deserializacja TOML; wbudowane profile mają poprawne wymiary.
 - [-] *5.2 Optymalizacja ścieżek (reorder/join/dedupe)* — *ODPUSZCZONE (2026-08-16)*.
