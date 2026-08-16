@@ -33,8 +33,10 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     let cutoffs = cutoffs_line(app);
     let note = app.note().map(|n| format!(" — {n}")).unwrap_or_default();
     let text = format!(
-        "Connected {} on {} — {activity}{cutoffs}{note} (enter: draw, ? keys)",
-        machine.version, machine.port,
+        "Connected {} on {} [{}] — {activity}{cutoffs}{note} (enter: draw, ? keys)",
+        machine.version,
+        machine.port,
+        app.profile().summary(),
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));
     frame.render_widget(widget, area);

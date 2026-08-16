@@ -586,6 +586,35 @@ pull-off ~$27 = 1~ mm. *To jest profil bazowy* — reszta tabeli zostaje dla inn
 w *TOML*; wymiary i limity *auto-odczytujemy z ~$$~* (~$130/$131~, ~$110/$111~, ~$120/$121~)
 i traktujemy plik profilu jako override. Rozmiary AxiDraw — tylko jako referencja, gdyby kiedyś.
 
+** Jak profil powstaje (implementacja, krok 5.1)
+~profiles.rs~ + ~config.rs~. Trzy źródła, w tej kolejności:
+1. *Wbudowany profil* — tabela modeli wyżej (~MODELS~), domyślnie ~idraw-a0~ (nasze
+   zmierzone 841 × 1189; tabela producenta ma A0 odwrotnie — wygrywa maszyna w pokoju).
+2. *~$$~ z firmware'u* — ~$130/$131~ → pole, ~min($110,$111)~ → ~max_feed~. Odczyt przy
+   starcie (~Driver::read_settings~), best-effort: brak odpowiedzi = zostają domyślne.
+3. *TOML użytkownika* — ~<config_dir>/plotly/config.toml~, sekcje ~[profiles.<nazwa>]~,
+   *ostatnie słowo* w każdym polu, które wymienia.
+
+*Świadoma decyzja:* jawne ~--profile~ *nie jest* korygowane przez ~$$~. Nazwanie profilu to
+deklaracja „taka jest maszyna" — np. planujesz rysunek pod A3, mając podpięte A0. Bez
+~--profile~ wierzymy firmware'owi.
+
+*Limity:* wszystkie feedy XY (draw/travel/jog + ~pen.xy_feed~) są *klamrowane* do ~max_feed~
+z ostrzeżeniem w logu — ani profil, ani literówka w configu nie poproszą karetki o więcej,
+niż ma. Feed Z zostaje nietknięty (inna oś, własny limit ~$112~).
+
+*Plik configu — nieznany klucz to BŁĄD*, nie ciche pominięcie (~deny_unknown_fields~):
+po cichu zignorowane ~pen_dwon_z~ to ustawienie, które użytkownik uważa za działające.
+Niepoprawny TOML zatrzymuje start z komunikatem i ścieżką, zanim wejdzie TUI.
+#+begin_example
+# ~/.config/plotly/config.toml
+[profiles.idraw-a0]
+pen_down_z = 5.4      # kalibracja pod konkretne pióro/podłoże (15.3)
+draw_feed  = 1500
+#+end_example
+Klucze: ~width_mm~, ~height_mm~, ~pen_up_z~, ~pen_down_z~, ~pen_z_feed~, ~draw_feed~,
+~travel_feed~, ~jog_feed~, ~max_feed~, ~max_segment_mm~.
+
 * 11. Stack technologiczny
 | Warstwa | Crate | Dlaczego |
 |---------+-------+----------|
@@ -825,17 +854,22 @@ od razu*. Zamiast tego:
 - [ ] *5.1 Profile maszyn (TOML) + ~--profile~.* ~profiles.rs~/~config.rs~: pola z sekcji 10,
   auto-odczyt z ~$$~ gdzie się da. /Test:/ ~--profile idraw-a3~ zmienia pole/limity. /Auto:/ U:
   deserializacja TOML; wbudowane profile mają poprawne wymiary.
-- [ ] *5.2 Optymalizacja ścieżek (reorder/join/dedupe).* ~plan/optimize.rs~ (nearest-neighbour/
-  2-opt). /Test:/ DEBUG: pen-up travel przed/po. /Auto:/ U: po optymalizacji travel pen-up ≤
-  przed; zbiór segmentów pen-down niezmieniony (tylko kolejność).
+- [-] *5.2 Optymalizacja ścieżek (reorder/join/dedupe)* — *ODPUSZCZONE (2026-08-16)*.
+  Użytkownik robi reorder *i* hatch-fill w *vpype* przed wczytaniem SVG do plotly, więc
+  dublowanie tego w aplikacji nie ma wartości. Ten sam powód wyjmuje *hatch-fill* z 5.4.
+  /Konsekwencja:/ plotly rysuje ścieżki *w kolejności z pliku* — to teraz kontrakt, nie
+  niedoróbka, i panel „Strokes" (3.7) pokazuje dokładnie to, co dał vpype.
 - [ ] *5.3 Frame + estymacja czasu.* ~f~ obrysowuje bbox (pen-up); ~plan/estimate.rs~ dry-run
   czas+dystans. /Test:/ ✱ frame obrysowuje pole; estymata ~est=~ w UI. /Auto:/ U: estymata ≈ suma
   czasów segmentów (model prędkości/accel z profilu).
-- [ ] *5.4 Reszta parytetu i UX (3.4/3.5/3.6).* Kopie/warstwy, ~page_delay~, hatch-fill;
-  *set origin* (~o~, work offset/G54), *go-to XY* (~g~), ~JogZ~ / kreator kalibracji pióra-Z,
-  przełącznik mm/inch, kolejka zadań. Domyka komendy z sekcji 4 i keybindy z sekcji 8, które
-  nie mają własnego kroku. /Test:/ per-funkcja na ~--simulate~ + ✱ wybrane na sprzęcie.
-  /Auto:/ U: hatch-fill prostokąta → linie w zadanym odstępie, w obrębie kształtu.
+- [ ] *5.4 Reszta parytetu i UX (3.4/3.5/3.6).* Kopie/warstwy, ~page_delay~;
+  *go-to XY* (~g~), ~JogZ~ / kreator kalibracji pióra-Z, przełącznik mm/inch, kolejka zadań.
+  Domyka komendy z sekcji 4 i keybindy z sekcji 8, które nie mają własnego kroku.
+  /Test:/ per-funkcja na ~--simulate~ + ✱ wybrane na sprzęcie.
+  /Zmiany zakresu:/ *hatch-fill wypadł* razem z 5.2 (robi to vpype). *Set origin* jest już
+  zrobiony inaczej i bez klawisza — originem jest pozycja głowicy przy ~Enter~ (2.4 pkt C).
+  ~pen_down_z~ da się już ustawić w ~config.toml~ (10), więc z kalibracji Z zostaje sam
+  kreator/~JogZ~.
 
 * 15. Wyniki spike'u 0.7 (2026-07-22) i to, co zostało otwarte
 Spike wykonany na fizycznej maszynie (~examples/spike.rs~, port ~/dev/ttyACM0~, VID:PID

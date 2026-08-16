@@ -4,19 +4,20 @@
 //! `ok` means "queued", not "finished" (§15.1) — good enough for pen moves,
 //! but the job worker (step 2.4) will need `?` to know when motion really ends.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::time::{Duration, Instant};
 
 use super::Connection;
 use crate::geometry::{Point, Transform};
+use crate::profiles::DEFAULT_JOG_FEED;
 
 /// How long a command may take to be acknowledged.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Feed rate for jog moves, mm/min. Well under the machine max (`$110`≈15000,
-/// §15.1) so a fat-fingered hold cannot slam the carriage at full speed.
-const JOG_FEED: u32 = 3000;
+/// How long the settings dump (`$$`) may take. It is a few dozen short lines.
+const SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a homing cycle may take. Unlike every other command, `$H` answers
 /// `ok` only when the cycle *finishes* — measured at 3–7 s on an A0 machine
@@ -112,10 +113,48 @@ impl From<io::Error> for DriverError {
     }
 }
 
+/// What the firmware answered to `$$`: setting number to value (§15.1).
+///
+/// Kept as raw numbers rather than a named struct because that is what the
+/// board sends and because the interesting ones differ per firmware; the
+/// profile (step 5.1) picks out the handful it understands.
+#[derive(Debug, Clone, Default)]
+pub struct GrblSettings(HashMap<u16, f64>);
+
+impl GrblSettings {
+    /// Value of setting `$n`, if the board reported it.
+    pub fn get(&self, n: u16) -> Option<f64> {
+        self.0.get(&n).copied()
+    }
+
+    /// How many settings came back.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Build from `(number, value)` pairs — the parse result, and what tests
+    /// stand a board up with.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (u16, f64)>) -> Self {
+        Self(pairs.into_iter().collect())
+    }
+}
+
+/// Parse one `$130=841.000` line into its number and value.
+fn parse_setting(line: &str) -> Option<(u16, f64)> {
+    let (number, value) = line.trim().strip_prefix('$')?.split_once('=')?;
+    Some((number.trim().parse().ok()?, value.trim().parse().ok()?))
+}
+
 /// Owns the connection and turns intents into G-code.
 pub struct Driver {
     connection: Connection,
     settings: PenSettings,
+    /// Feed for interactive jogging, mm/min (from the machine profile).
+    jog_feed: u32,
     transform: Transform,
     pen: Pen,
     /// Best-known machine-logical position (mm). Meaningful after `$H`; the
@@ -131,10 +170,63 @@ impl Driver {
         Self {
             connection,
             settings: PenSettings::default(),
+            jog_feed: DEFAULT_JOG_FEED,
             transform: Transform::idraw(),
             pen: Pen::Up,
             pos: Point::new(0.0, 0.0),
         }
+    }
+
+    /// Take the pen geometry and jog speed from a machine profile (step 5.1).
+    ///
+    /// Applied after construction because the profile is only settled once the
+    /// board has been asked what it is (`$$`), which needs a driver first.
+    pub fn apply_profile(&mut self, profile: &crate::profiles::Profile) {
+        self.settings = profile.pen;
+        self.jog_feed = profile.jog_feed;
+        tracing::debug!(
+            profile = %profile.name,
+            down_z = self.settings.down_z,
+            up_z = self.settings.up_z,
+            jog_feed = self.jog_feed,
+            "driver configured from the profile"
+        );
+    }
+
+    /// Read the firmware's settings dump (`$$`).
+    ///
+    /// Lines look like `$130=841.000` and the block ends with `ok`. Anything
+    /// unparseable is logged and skipped rather than failing the read: this is
+    /// a best-effort look at the machine, and a profile without it still works.
+    pub fn read_settings(&mut self) -> Result<GrblSettings, DriverError> {
+        self.connection.transport.send_line("$$")?;
+        let deadline = Instant::now() + SETTINGS_TIMEOUT;
+        let mut found = HashMap::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.connection.transport.read_line_for(left)? {
+                Some(line) if line == "ok" => break,
+                Some(line) if line.starts_with("error:") || line.starts_with("ALARM") => {
+                    return Err(DriverError::Refused {
+                        command: "$$".to_owned(),
+                        reply: line,
+                    })
+                }
+                Some(line) => match parse_setting(&line) {
+                    Some((number, value)) => {
+                        found.insert(number, value);
+                    }
+                    None => tracing::debug!(%line, "unrecognised line in the settings dump"),
+                },
+                None => {
+                    return Err(DriverError::Timeout {
+                        command: "$$".to_owned(),
+                    })
+                }
+            }
+        }
+        tracing::debug!(settings = found.len(), "read the firmware settings ($$)");
+        Ok(GrblSettings(found))
     }
 
     pub fn version(&self) -> &str {
@@ -239,7 +331,7 @@ impl Driver {
         if wy != 0.0 {
             let _ = write!(line, " Y{wy:.3}");
         }
-        let _ = write!(line, " F{JOG_FEED}");
+        let _ = write!(line, " F{}", self.jog_feed);
         tracing::debug!(dx_mm, dy_mm, %line, "jog");
         self.command(&line)?;
         // Jog deltas are logical mm in the same frame as the tracked position.
@@ -466,6 +558,67 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert_eq!(d.pen(), Pen::Up, "a refused move must not change state");
+    }
+
+    #[test]
+    fn settings_are_read_from_the_dump() {
+        let mut d = driver_on(MockTransport::new());
+        let settings = d.read_settings().expect("$$ answered");
+
+        // The mock answers with our machine's real dump (§15.1).
+        assert_eq!(settings.get(130), Some(841.0), "max travel X");
+        assert_eq!(settings.get(131), Some(1189.0), "max travel Y");
+        assert_eq!(settings.get(110), Some(15_000.0), "max rate X");
+        assert_eq!(settings.get(999), None, "a setting it never sent");
+        assert!(!settings.is_empty());
+    }
+
+    #[test]
+    fn a_settings_line_parses_into_its_number_and_value() {
+        assert_eq!(parse_setting("$130=841.000"), Some((130, 841.0)));
+        assert_eq!(parse_setting(" $27=1.000 "), Some((27, 1.0)));
+        // Not settings: the `ok`, a status report, junk.
+        assert_eq!(parse_setting("ok"), None);
+        assert_eq!(parse_setting("<Idle|MPos:0.000,0.000,0.000>"), None);
+        assert_eq!(parse_setting("$hello=world"), None);
+    }
+
+    /// A board that never answers must not hang the startup, and losing `$$`
+    /// is not fatal — the profile has defaults.
+    #[test]
+    fn an_unanswered_settings_read_times_out() {
+        let mut d = driver_on(MockTransport::unresponsive());
+        assert!(matches!(
+            d.read_settings().unwrap_err(),
+            DriverError::Timeout { .. }
+        ));
+    }
+
+    /// The profile owns the pen heights and the jog speed, so a config file can
+    /// set them without a rebuild (§10 / §15.3).
+    #[test]
+    fn a_profile_sets_the_pen_heights_and_jog_feed() {
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let mut d = driver_on(transport);
+
+        let mut profile = crate::profiles::Profile::builtin("idraw-a3").unwrap();
+        profile.pen.down_z = 6.5;
+        profile.jog_feed = 1234;
+        d.apply_profile(&profile);
+
+        d.pen_down().unwrap();
+        d.jog(10.0, 0.0).unwrap();
+
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().any(|l| l.contains("Z6.500")),
+            "the profile's pen-down Z was not used: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|l| l.ends_with("F1234")),
+            "the profile's jog feed was not used: {sent:?}"
+        );
     }
 
     #[test]

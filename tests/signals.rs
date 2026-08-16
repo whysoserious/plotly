@@ -13,6 +13,7 @@ use plotly::plotter::driver::{Driver, Pen};
 use plotly::plotter::mock::MockTransport;
 use plotly::plotter::worker::{MachineState, Worker};
 use plotly::plotter::Connection;
+use plotly::profiles::{self, Profile};
 use plotly::tui::request_shutdown;
 
 fn app_over_mock() -> (App, Arc<Mutex<Vec<String>>>) {
@@ -30,7 +31,15 @@ fn app_over_mock() -> (App, Arc<Mutex<Vec<String>>>) {
         pen: Pen::Up,
         position: Point::new(0.0, 0.0),
     };
-    let app = App::new(worker, machine, Vec::new(), None, None, LogRing::new());
+    let app = App::new(
+        worker,
+        machine,
+        Profile::builtin(profiles::DEFAULT_PROFILE).unwrap(),
+        Vec::new(),
+        None,
+        None,
+        LogRing::new(),
+    );
     (app, sent)
 }
 

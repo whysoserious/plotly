@@ -11,6 +11,28 @@ use super::transport::Transport;
 /// Firmware version the mock reports on `v`/`V`.
 pub const MOCK_VERSION: &str = "DrawCore V2.10";
 
+/// The settings the mock answers `$$` with: the ones actually read off our
+/// machine in spike 0.7 (§15.1), so `--simulate` resolves the same profile the
+/// hardware does.
+pub const MOCK_SETTINGS: &[(u16, f64)] = &[
+    (13, 0.0),       // report in mm
+    (20, 0.0),       // soft limits off
+    (21, 0.0),       // hard limits off
+    (23, 5.0),       // homing direction mask
+    (27, 1.0),       // homing pull-off, mm
+    (100, 100.0),    // steps/mm X
+    (101, 100.0),    // steps/mm Y
+    (102, 85.8),     // steps/mm Z
+    (110, 15_000.0), // max rate X, mm/min
+    (111, 12_000.0), // max rate Y, mm/min
+    (112, 15_000.0), // max rate Z, mm/min
+    (120, 3_000.0),  // acceleration X, mm/s²
+    (121, 3_000.0),  // acceleration Y, mm/s²
+    (130, 841.0),    // max travel X, mm
+    (131, 1_189.0),  // max travel Y, mm
+    (132, 10.0),     // max travel Z, mm
+];
+
 /// Fake plotter: auto-queues a canned response for each sent line and records
 /// what was sent so tests can assert on the exact wire traffic.
 #[derive(Debug)]
@@ -83,6 +105,13 @@ impl MockTransport {
         } else if cmd == "$B" {
             // Button state plus its `ok` — the two lines the reference reads.
             vec!["0".to_owned(), "ok".to_owned()]
+        } else if cmd == "$$" {
+            let mut lines: Vec<String> = MOCK_SETTINGS
+                .iter()
+                .map(|(n, v)| format!("${n}={v:.3}"))
+                .collect();
+            lines.push("ok".to_owned());
+            lines
         } else {
             vec!["ok".to_owned()]
         }

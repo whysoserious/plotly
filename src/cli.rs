@@ -28,7 +28,8 @@ pub struct Args {
     #[arg(long, value_name = "N", default_value_t = 115_200)]
     pub baud: u32,
 
-    /// Machine profile name (e.g. idraw-a4, idraw-a3).
+    /// Machine profile (idraw-a0, idraw-a1, idraw-a2, idraw-a3, idraw-a4,
+    /// idraw-xlx, idraw-b6, idraw-minikit). Default: read from the machine.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
@@ -105,6 +106,20 @@ mod tests {
         // Catches clap misconfiguration (conflicting settings, bad value parsers, ...).
         use clap::CommandFactory;
         Args::command().debug_assert();
+    }
+
+    /// The `--profile` help spells the names out; keep it honest against the
+    /// table they actually come from.
+    #[test]
+    fn the_help_lists_every_built_in_profile() {
+        use clap::CommandFactory;
+        let help = Args::command().render_long_help().to_string();
+        for name in crate::profiles::Profile::names() {
+            assert!(
+                help.contains(name),
+                "--profile help does not mention {name}:\n{help}"
+            );
+        }
     }
 
     #[test]

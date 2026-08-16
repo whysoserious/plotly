@@ -17,6 +17,7 @@ use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::{Plan, Shape};
 use crate::plotter::worker::{Command, Event, MachineState, Worker};
+use crate::profiles::Profile;
 use crate::{tui, ui};
 
 /// Idle poll timeout: bounds how often we wake to pick up worker events and new
@@ -68,6 +69,8 @@ pub struct App {
     /// A pause was asked for and the plot is drawing out the current shape
     /// before it takes hold, for the status bar.
     pausing: bool,
+    /// The machine this run is driving: field, feeds, pen heights (§10).
+    profile: Profile,
     /// The loaded drawing in drawing-logical mm, before placement. Kept so the
     /// plan can be laid down afresh from wherever the head is when `Enter` is
     /// pressed; empty when nothing was loaded.
@@ -114,6 +117,7 @@ impl App {
     pub fn new(
         worker: Worker,
         machine: MachineState,
+        profile: Profile,
         shapes: Vec<Shape>,
         source: Option<String>,
         resume: Option<Resumable>,
@@ -121,7 +125,8 @@ impl App {
     ) -> Self {
         // A plan for the preview, laid down from where the head is now. It is
         // rebuilt when the plot starts, so jogging first moves the drawing.
-        let plan = (!shapes.is_empty()).then(|| crate::build_plan(&shapes, machine.position));
+        let plan =
+            (!shapes.is_empty()).then(|| crate::build_plan(&shapes, machine.position, &profile));
         let estimate = plan
             .as_ref()
             .map(|p| (p.total_distance_mm(), p.estimated_secs()));
@@ -131,6 +136,7 @@ impl App {
             activity: Activity::Idle,
             note: None,
             pausing: false,
+            profile,
             shapes,
             plan,
             estimate,
@@ -506,7 +512,7 @@ impl App {
     /// refresh what the UI derives from it.
     fn place_at_head(&mut self) {
         let at = self.machine.position;
-        let plan = crate::build_plan(&self.shapes, at);
+        let plan = crate::build_plan(&self.shapes, at, &self.profile);
         tracing::info!(
             x = at.x,
             y = at.y,
@@ -632,6 +638,11 @@ impl App {
         &self.machine
     }
 
+    /// The machine profile in force, for the status bar and the placement.
+    pub fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
     /// The loaded plan, if any, for the toolpath preview.
     pub fn plan(&self) -> Option<&Plan> {
         self.plan.as_ref()
@@ -726,6 +737,7 @@ mod tests {
         let app = App::new(
             worker,
             machine,
+            test_profile(),
             Vec::new(),
             None,
             Some(resumable),
@@ -740,6 +752,11 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The default machine, as resolved with no profile named and no `$$`.
+    fn test_profile() -> Profile {
+        Profile::builtin(crate::profiles::DEFAULT_PROFILE).expect("the default profile exists")
     }
 
     fn close(a: Point, b: Point) -> bool {
@@ -767,7 +784,15 @@ mod tests {
             Point::new(20.0, 0.0),
             Point::new(20.0, 10.0),
         ])];
-        App::new(worker, machine, shapes, None, None, LogRing::new())
+        App::new(
+            worker,
+            machine,
+            test_profile(),
+            shapes,
+            None,
+            None,
+            LogRing::new(),
+        )
     }
 
     /// The drawing follows the head: jog to the corner of the sheet, press

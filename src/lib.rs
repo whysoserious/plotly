@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod config;
 pub mod fonts;
 pub mod geometry;
 pub mod job;
@@ -12,6 +13,7 @@ pub mod keys;
 pub mod logging;
 pub mod plan;
 pub mod plotter;
+pub mod profiles;
 pub mod tui;
 pub mod ui;
 
@@ -72,6 +74,22 @@ pub fn run() -> io::Result<()> {
     let connection =
         plotter::connect(&port, args.baud).map_err(|err| fail("handshake failed", err))?;
 
+    // Settle the machine profile before anything is planned or moved: it fixes
+    // the field, the feeds and the pen heights (§10). The board is asked what
+    // it is (`$$`) and the user's TOML gets the last word.
+    let mut driver = plotter::driver::Driver::new(connection);
+    let reported = match driver.read_settings() {
+        Ok(settings) => Some(settings),
+        Err(err) => {
+            tracing::warn!(%err, "could not read $$; falling back to the profile defaults");
+            None
+        }
+    };
+    let user_config = config::load().map_err(|err| fail("cannot use the config file", err))?;
+    let profile = profiles::resolve(args.profile.as_deref(), reported.as_ref(), &user_config)
+        .map_err(|err| fail("cannot use that profile", err))?;
+    driver.apply_profile(&profile);
+
     let source = match (&args.text, &args.svg_file) {
         (Some(text), _) => Some(format!("text: {text}")),
         (None, Some(path)) => Some(path.display().to_string()),
@@ -93,23 +111,21 @@ pub fn run() -> io::Result<()> {
             "unfinished job found; offering resume"
         );
     }
-    run_tui(
-        plotter::driver::Driver::new(connection),
-        shapes,
-        source,
-        resume,
-        log,
-    )
+    run_tui(driver, profile, shapes, source, resume, log)
 }
 
 /// Build the plan to draw, with the shapes (mm) laid down from `at` — the
-/// head's current position. Shared by SVG and text; covers the DEBUG checks of
-/// §2.2/§2.3 (execution is the worker).
+/// head's current position — on the machine `profile` describes. Shared by SVG
+/// and text; covers the DEBUG checks of §2.2/§2.3 (execution is the worker).
 ///
 /// The drawing's top-left corner goes on `at` rather than the middle of the
 /// field: the operator jogs to the corner of their sheet and starts there.
-pub fn build_plan(shapes: &[plan::Shape], at: geometry::Point) -> plan::Plan {
-    let field = geometry::Field::idraw_a0();
+pub fn build_plan(
+    shapes: &[plan::Shape],
+    at: geometry::Point,
+    profile: &profiles::Profile,
+) -> plan::Plan {
+    let field = profile.field;
     let placement = match bounds_of(shapes) {
         Some(bounds) => {
             let placement = geometry::Placement::anchored_at(bounds, &field, DEFAULT_MARGIN_MM, at);
@@ -139,7 +155,7 @@ pub fn build_plan(shapes: &[plan::Shape], at: geometry::Point) -> plan::Plan {
         None => geometry::Placement::identity(),
     };
 
-    let settings = plan::PlanSettings::default();
+    let settings = profile.plan;
     let job = plan::Plan::build_shapes(shapes, &placement, &settings);
     tracing::debug!(
         ops = job.ops.len(),
@@ -181,6 +197,7 @@ fn fail<E: std::error::Error + Send + Sync + 'static>(context: &str, err: E) -> 
 /// the TUI app against it.
 fn run_tui(
     driver: plotter::driver::Driver,
+    profile: profiles::Profile,
     shapes: Vec<plan::Shape>,
     source: Option<String>,
     resume: Option<job::Resumable>,
@@ -200,5 +217,5 @@ fn run_tui(
     let worker = plotter::worker::Worker::spawn(driver);
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    app::App::new(worker, machine, shapes, source, resume, log).run(&mut terminal)
+    app::App::new(worker, machine, profile, shapes, source, resume, log).run(&mut terminal)
 }
