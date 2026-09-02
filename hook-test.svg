@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hook test v2 (DESIGN.org 2.5).
+     A  serpentine polyline   - 90 deg corners, pen stays DOWN        (was clean)
+     B  6 lines all L->R      - pen lift + 40 mm travel back and down (was hooked)
+     D  6 lines boustrophedon - pen lift + 3 mm travel, alternating   (new)
+     C  one line, last        - pen lift, nothing after it            (was clean)
+
+     D is the readout. Its strokes alternate direction, so the finishing end
+     alternates between x=50 and x=10: whichever side the hooks sit on says
+     whether they are made at the END of a stroke or at its START. And its
+     travels are 3 mm instead of 40, so if the hooks vanish here it is the
+     long fast travel that draws them, not the pen move. -->
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1"
+     width="60mm" height="100mm" viewBox="0 0 60 100">
+  <g fill="none" stroke="black" stroke-width="0.2">
+    <!-- A: pen-down 90 deg corners -->
+    <polyline points="10,10 50,10 50,13 10,13 10,16 50,16 50,19 10,19 10,22 50,22 50,25 10,25"/>
+    <!-- B: pen lifts, 40 mm travel left+down between strokes -->
+    <line x1="10" y1="35" x2="50" y2="35"/>
+    <line x1="10" y1="38" x2="50" y2="38"/>
+    <line x1="10" y1="41" x2="50" y2="41"/>
+    <line x1="10" y1="44" x2="50" y2="44"/>
+    <line x1="10" y1="47" x2="50" y2="47"/>
+    <line x1="10" y1="50" x2="50" y2="50"/>
+    <!-- D: pen lifts, 3 mm travel, drawing direction alternates -->
+    <line x1="10" y1="60" x2="50" y2="60"/>
+    <line x1="50" y1="63" x2="10" y2="63"/>
+    <line x1="10" y1="66" x2="50" y2="66"/>
+    <line x1="50" y1="69" x2="10" y2="69"/>
+    <line x1="10" y1="72" x2="50" y2="72"/>
+    <line x1="50" y1="75" x2="10" y2="75"/>
+    <!-- C: control, nothing follows -->
+    <line x1="10" y1="90" x2="50" y2="90"/>
+  </g>
+</svg>

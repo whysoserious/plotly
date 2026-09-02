@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::plotter::driver::PenFence;
+
 const CONFIG_FILE: &str = "config.toml";
 
 /// The whole config file. Unknown keys are rejected rather than ignored: a
@@ -54,9 +56,14 @@ pub struct ProfileOverride {
     pub pen_down_z: Option<f32>,
     /// Feed for the pen's own Z move, mm/min.
     pub pen_z_feed: Option<u32>,
-    /// Stillness after the pen's Z move, seconds — raise it if a spring-loaded
-    /// holder still marks the paper as it lifts.
-    pub pen_settle_secs: Option<f64>,
+    /// Stillness after *lifting* the pen, seconds.
+    pub pen_settle_up_secs: Option<f64>,
+    /// Stillness after *lowering* the pen, seconds. Time here is time with the
+    /// tip on the paper and nothing moving — the dot at the start of a stroke.
+    pub pen_settle_down_secs: Option<f64>,
+    /// What holds XY still while the pen moves: `"dwell"` (`G4`), `"poll"`
+    /// (`?` until `Idle`) or `"off"`. See DESIGN.org §2.5.
+    pub pen_fence: Option<PenFence>,
     /// Feed while drawing, mm/min.
     pub draw_feed: Option<u32>,
     /// Feed while travelling with the pen up, mm/min.
@@ -67,6 +74,14 @@ pub struct ProfileOverride {
     pub max_feed: Option<u32>,
     /// Longest single plan segment, mm — the stop/resume granularity (§6).
     pub max_segment_mm: Option<f64>,
+    /// Acceleration to *put on the machine*, mm/s² (`$120`/`$121`). Unlike
+    /// every other field this one is written back to the board's EEPROM, so
+    /// the tuning that stops an A0 gantry bending the end of a stroke lives in
+    /// a file instead of in someone's memory (§2.5).
+    pub accel_mm_s2: Option<f64>,
+    /// Junction deviation to put on the machine, mm (`$11`) — how much speed
+    /// the planner may carry through a corner. Also written back.
+    pub junction_deviation_mm: Option<f64>,
 }
 
 /// Why a config file could not be used.
@@ -110,7 +125,10 @@ pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            tracing::debug!(path = %path.display(), "no config file; using defaults");
+            // INFO, not DEBUG: "my setting did not take effect" is otherwise a
+            // silent failure, and this line names the exact path a config
+            // would be read from. One line per startup buys that.
+            tracing::info!(path = %path.display(), "no config file; using defaults");
             return Ok(Config::default());
         }
         Err(err) => {
@@ -171,12 +189,16 @@ mod tests {
             pen_up_z = 0.4
             pen_down_z = 5.2
             pen_z_feed = 4000
-            pen_settle_secs = 0.08
+            pen_settle_up_secs = 0.08
+            pen_settle_down_secs = 0.0
+            pen_fence = "poll"
             draw_feed = 1800
             travel_feed = 7000
             jog_feed = 2500
             max_feed = 9000
             max_segment_mm = 2.5
+            accel_mm_s2 = 500.0
+            junction_deviation_mm = 0.002
             "#,
         )
         .expect("valid config");
@@ -187,12 +209,16 @@ mod tests {
         assert_eq!(o.pen_up_z, Some(0.4));
         assert_eq!(o.pen_down_z, Some(5.2));
         assert_eq!(o.pen_z_feed, Some(4000));
-        assert_eq!(o.pen_settle_secs, Some(0.08));
+        assert_eq!(o.pen_settle_up_secs, Some(0.08));
+        assert_eq!(o.pen_settle_down_secs, Some(0.0));
+        assert_eq!(o.pen_fence, Some(PenFence::Poll));
         assert_eq!(o.draw_feed, Some(1800));
         assert_eq!(o.travel_feed, Some(7000));
         assert_eq!(o.jog_feed, Some(2500));
         assert_eq!(o.max_feed, Some(9000));
         assert_eq!(o.max_segment_mm, Some(2.5));
+        assert_eq!(o.accel_mm_s2, Some(500.0));
+        assert_eq!(o.junction_deviation_mm, Some(0.002));
     }
 
     /// A typo must not be swallowed: the user believes the setting is live.

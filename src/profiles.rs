@@ -152,12 +152,16 @@ impl Profile {
             pen_up_z,
             pen_down_z,
             pen_z_feed,
-            pen_settle_secs,
+            pen_settle_up_secs,
+            pen_settle_down_secs,
+            pen_fence,
             draw_feed,
             travel_feed,
             jog_feed,
             max_feed,
             max_segment_mm,
+            accel_mm_s2,
+            junction_deviation_mm,
         } = *over;
 
         set(&mut self.field.width_mm, width_mm);
@@ -167,14 +171,55 @@ impl Profile {
         set(&mut self.pen.z_feed, pen_z_feed);
         // A negative settle would make the dwell an `error:` from the board.
         set(
-            &mut self.pen.settle_secs,
-            pen_settle_secs.map(|s| s.max(0.0)),
+            &mut self.pen.settle_up_secs,
+            pen_settle_up_secs.map(|s| s.max(0.0)),
         );
+        set(
+            &mut self.pen.settle_down_secs,
+            pen_settle_down_secs.map(|s| s.max(0.0)),
+        );
+        set(&mut self.pen.fence, pen_fence);
         set(&mut self.plan.draw_feed, draw_feed);
         set(&mut self.plan.travel_feed, travel_feed);
         set(&mut self.jog_feed, jog_feed);
         set(&mut self.max_feed, max_feed);
         set(&mut self.plan.max_segment_mm, max_segment_mm);
+        set(&mut self.accel_mm_s2, accel_mm_s2);
+        set(&mut self.junction_deviation_mm, junction_deviation_mm);
+    }
+
+    /// The firmware settings this profile wants that the board does not
+    /// already have, as `(number, value)` ready for [`Driver::write_setting`].
+    ///
+    /// Only what the *config* named: a profile carries an acceleration either
+    /// way, and writing a built-in default back onto someone's machine would
+    /// be a program with opinions about hardware it was only asked to drive.
+    /// Values already correct are left alone, so a startup that changes
+    /// nothing writes nothing.
+    pub fn firmware_writes(
+        &self,
+        over: &ProfileOverride,
+        reported: Option<&GrblSettings>,
+    ) -> Vec<(u16, f64)> {
+        let wanted = [
+            (over.accel_mm_s2, grbl::ACCEL_X, self.accel_mm_s2),
+            (over.accel_mm_s2, grbl::ACCEL_Y, self.accel_mm_s2),
+            (
+                over.junction_deviation_mm,
+                grbl::JUNCTION_DEVIATION,
+                self.junction_deviation_mm,
+            ),
+        ];
+        wanted
+            .into_iter()
+            .filter(|(asked, _, _)| asked.is_some())
+            .filter(|(_, number, value)| {
+                // No dump means no idea what is on the board; write it rather
+                // than assume, since the user asked for it by name.
+                reported.and_then(|r| r.get(*number)) != Some(*value)
+            })
+            .map(|(_, number, value)| (number, value))
+            .collect()
     }
 
     /// Hold every XY feed at or below [`Profile::max_feed`].
@@ -278,13 +323,31 @@ pub fn resolve(
     profile.apply_override(&config.overrides_for(name));
     profile.clamp_feeds();
 
+    // Everything a drawing artefact could be blamed on, on one line. The two
+    // firmware numbers are here because they are the ones that turned out to
+    // matter and the ones nobody can see: `$120` at its Grbl default threw
+    // 0.3 g at an A0 gantry and bent the end of every stroke (§2.5), and the
+    // only place that figure appeared was a DEBUG line nobody reads.
     tracing::info!(
         profile = %profile.name,
         width_mm = profile.field.width_mm,
         height_mm = profile.field.height_mm,
         draw_feed = profile.plan.draw_feed,
         travel_feed = profile.plan.travel_feed,
+        accel_mm_s2 = profile.accel_mm_s2,
+        junction_deviation_mm = profile.junction_deviation_mm,
         pen_down_z = profile.pen.down_z,
+        pen_up_z = profile.pen.up_z,
+        // How far the tip actually rises. Logged because "the pen is up" is an
+        // assumption everywhere else, and a small lift is the first thing to
+        // suspect when travel marks the paper (§2.5).
+        pen_lift_mm = profile.pen.down_z - profile.pen.up_z,
+        pen_z_feed = profile.pen.z_feed,
+        // Stillness with the tip on the paper is ink; stillness in the air is
+        // only time (§2.7).
+        pen_settle_up_secs = profile.pen.settle_up_secs,
+        pen_settle_down_secs = profile.pen.settle_down_secs,
+        pen_fence = ?profile.pen.fence,
         "machine profile"
     );
     Ok(profile)
@@ -417,23 +480,75 @@ mod tests {
     }
 
     /// The Z axis has its own limit, so an XY cap must not slow the pen lift.
-    /// The settle is the one pen number a user is expected to tune by eye, so
-    /// it has to survive the TOML — and a negative one must not reach the board
-    /// as a `G4 P-…`.
+    /// A startup that changes nothing must write nothing: `$` writes land in
+    /// EEPROM, and reconfiguring someone's plotter as a side effect of opening
+    /// the program would be a program with opinions about hardware.
     #[test]
-    fn the_pen_settle_comes_from_the_config_and_never_goes_negative() {
+    fn firmware_settings_are_written_only_when_asked_for_and_wrong() {
+        let board = reported(&[(11, 0.010), (120, 3000.0), (121, 3000.0)]);
+        let profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+
+        // Nothing in the config: nothing to write, whatever the board says.
+        assert!(profile
+            .firmware_writes(&ProfileOverride::default(), Some(&board))
+            .is_empty());
+
+        // Asked for, and the board disagrees: both acceleration axes and the
+        // junction deviation go out.
+        let mut over = ProfileOverride {
+            accel_mm_s2: Some(500.0),
+            junction_deviation_mm: Some(0.002),
+            ..Default::default()
+        };
+        let mut tuned = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        tuned.apply_override(&over);
+        assert_eq!(
+            tuned.firmware_writes(&over, Some(&board)),
+            vec![(120, 500.0), (121, 500.0), (11, 0.002)]
+        );
+
+        // Asked for, and the board already agrees: silence.
+        let agreed = reported(&[(11, 0.002), (120, 500.0), (121, 500.0)]);
+        assert!(tuned.firmware_writes(&over, Some(&agreed)).is_empty());
+
+        // No `$$` at all — write it rather than assume the board is right.
+        over.junction_deviation_mm = None;
+        assert_eq!(
+            tuned.firmware_writes(&over, None),
+            vec![(120, 500.0), (121, 500.0)]
+        );
+    }
+
+    /// The settles are the pen numbers a user is expected to tune by eye, so
+    /// they have to survive the TOML — and a negative one must not reach the
+    /// board as a `G4 P-…`.
+    #[test]
+    fn the_pen_settles_come_from_the_config_and_never_go_negative() {
         let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
         profile.apply_override(&ProfileOverride {
-            pen_settle_secs: Some(0.12),
+            pen_settle_up_secs: Some(0.12),
+            pen_settle_down_secs: Some(0.03),
             ..Default::default()
         });
-        assert_eq!(profile.pen.settle_secs, 0.12);
+        assert_eq!(profile.pen.settle_up_secs, 0.12);
+        assert_eq!(profile.pen.settle_down_secs, 0.03);
 
         profile.apply_override(&ProfileOverride {
-            pen_settle_secs: Some(-1.0),
+            pen_settle_up_secs: Some(-1.0),
+            pen_settle_down_secs: Some(-1.0),
             ..Default::default()
         });
-        assert_eq!(profile.pen.settle_secs, 0.0);
+        assert_eq!(profile.pen.settle_up_secs, 0.0);
+        assert_eq!(profile.pen.settle_down_secs, 0.0);
+    }
+
+    /// The two are not interchangeable: standing still on the paper is what
+    /// puts a dot at the start of a stroke, so the landing ships at zero.
+    #[test]
+    fn the_pen_does_not_stand_still_on_the_paper_by_default() {
+        let profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        assert_eq!(profile.pen.settle_down_secs, 0.0);
+        assert!(profile.pen.settle_up_secs > 0.0);
     }
 
     #[test]

@@ -11,6 +11,10 @@ use super::transport::Transport;
 /// Firmware version the mock reports on `v`/`V`.
 pub const MOCK_VERSION: &str = "DrawCore V2.10";
 
+/// What the mock answers to a realtime `?`. Nothing moves in here, so the
+/// machine is never anything but idle.
+pub const MOCK_STATUS: &str = "<Idle|MPos:0.000,0.000,0.000|FS:0,0>";
+
 /// The settings the mock answers `$$` with: the ones actually read off our
 /// machine in spike 0.7 (§15.1), so `--simulate` resolves the same profile the
 /// hardware does.
@@ -167,6 +171,12 @@ impl Transport for MockTransport {
     fn write_realtime(&mut self, byte: u8) -> io::Result<()> {
         tracing::trace!(target: "plotly::transport", "-> realtime {byte:#04x}");
         self.realtime.lock().expect("mock log poisoned").push(byte);
+        // A status query has to be answered or anything waiting on `?` — the
+        // poll fence of §2.5 — would hang under `--simulate`. The mock has no
+        // motion to be busy with, so it is always idle.
+        if byte == b'?' && !self.mute {
+            self.responses.push_back(MOCK_STATUS.to_owned());
+        }
         Ok(())
     }
 }

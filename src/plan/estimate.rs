@@ -34,8 +34,11 @@ pub struct Machine {
     /// Grbl's junction deviation, mm (`$11`): how far off the corner the head
     /// is allowed to cut, which is what sets the speed it may carry through.
     pub junction_deviation_mm: f64,
-    /// Time for one pen up or down, seconds — the Z move plus a settle.
-    pub pen_secs: f64,
+    /// Time for one pen *lift*, seconds — the Z move plus its settle.
+    pub pen_up_secs: f64,
+    /// Time for one pen *landing*. Usually the shorter of the two: standing
+    /// still on the paper costs ink, so its settle ships at zero (§2.5).
+    pub pen_down_secs: f64,
 }
 
 impl Machine {
@@ -48,9 +51,10 @@ impl Machine {
         Self {
             accel_mm_s2: profile.accel_mm_s2,
             junction_deviation_mm: profile.junction_deviation_mm,
-            // The settle is the profile's, so the estimate counts the same
+            // The settles are the profile's, so the estimate counts the same
             // stillness the driver actually holds (`Driver::set_pen`).
-            pen_secs: z_secs + profile.pen.settle_secs.max(0.0),
+            pen_up_secs: z_secs + profile.pen.settle_up_secs.max(0.0),
+            pen_down_secs: z_secs + profile.pen.settle_down_secs.max(0.0),
         }
     }
 }
@@ -124,7 +128,11 @@ pub fn estimate(plan: &Plan, machine: &Machine) -> Estimate {
                 let target = matches!(op, Op::PenDown);
                 if run.pen_down != target {
                     run.pen_down = target;
-                    out.secs += machine.pen_secs;
+                    out.secs += if target {
+                        machine.pen_down_secs
+                    } else {
+                        machine.pen_up_secs
+                    };
                 }
             }
             Op::SetFeed(f) => run.feed_mm_min = f64::from(*f),
@@ -287,7 +295,8 @@ mod tests {
         Machine {
             accel_mm_s2: 3000.0,
             junction_deviation_mm: 0.01,
-            pen_secs: 0.1,
+            pen_up_secs: 0.1,
+            pen_down_secs: 0.1,
         }
     }
 
@@ -491,10 +500,10 @@ mod tests {
         let slow = Machine::from_profile(&profile);
 
         assert!(
-            slow.pen_secs > quick.pen_secs,
+            slow.pen_up_secs > quick.pen_up_secs,
             "{} vs {}",
-            slow.pen_secs,
-            quick.pen_secs
+            slow.pen_up_secs,
+            quick.pen_up_secs
         );
         assert_eq!(quick.accel_mm_s2, profile.accel_mm_s2);
     }

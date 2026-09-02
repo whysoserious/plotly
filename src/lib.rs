@@ -90,6 +90,20 @@ pub fn run() -> io::Result<()> {
         .map_err(|err| fail("cannot use that profile", err))?;
     driver.apply_profile(&profile);
 
+    // Put the firmware settings the config asked for onto the board. Grbl's
+    // defaults for `$120` and `$11` assume a tool in a spindle, not a pen on a
+    // sprung holder at the end of an A0 gantry (§2.5) — and a setting typed
+    // into a console once is a setting nobody can later prove is there.
+    for (number, value) in
+        profile.firmware_writes(&user_config.overrides_for(&profile.name), reported.as_ref())
+    {
+        if let Err(err) = driver.write_setting(number, value) {
+            // Not fatal: the drawing is still the drawing, it just runs with
+            // the machine's own idea of how hard to stop.
+            tracing::warn!(%err, setting = number, value, "could not write the firmware setting");
+        }
+    }
+
     let source = match (&args.text, &args.svg_file) {
         (Some(text), _) => Some(format!("text: {text}")),
         (None, Some(path)) => Some(path.display().to_string()),

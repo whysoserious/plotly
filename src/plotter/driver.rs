@@ -29,9 +29,32 @@ const HOMING_TIMEOUT: Duration = Duration::from_secs(120);
 /// so a couple of seconds is the real figure; this is slack around it.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default [`PenSettings::settle_secs`]. A guess, and the one pen number with
-/// no firmware setting behind it; the time estimate assumes the same figure.
-const DEFAULT_PEN_SETTLE_SECS: f64 = 0.05;
+/// Gap between `?` polls in [`Driver::wait_idle`]. Short enough to fence a pen
+/// move without adding much to it, long enough not to flood the board.
+const POLL_GAP: Duration = Duration::from_millis(10);
+
+/// How long to listen for the answer to one `?`.
+const POLL_WINDOW: Duration = Duration::from_millis(80);
+
+/// Consecutive `Idle` reports [`Driver::wait_idle`] needs before it believes
+/// the machine. One is not enough: after `ok` the state stays `Idle` for a
+/// moment before turning `Run` (§15.1), so a single early poll would wave a
+/// still-moving machine through. Three polls is ~30 ms of doubt, which beats
+/// drawing a hook.
+const IDLE_STREAK: usize = 3;
+
+/// Default [`PenSettings::settle_up_secs`]. A guess, and the one pen number
+/// with no firmware setting behind it; the time estimate assumes the same.
+const DEFAULT_SETTLE_UP_SECS: f64 = 0.05;
+
+/// Default [`PenSettings::settle_down_secs`] — *zero*, deliberately.
+///
+/// A settle after a lift costs nothing but time. A settle after a landing is
+/// time spent with the tip pressed on the paper and no motion to carry the ink
+/// away, which is how a plot ends up with a dot at the start of every stroke.
+/// The reference driver splits the two delays the same way and also ships the
+/// lowering one at zero (`pen_delay_up` / `pen_delay_down`).
+const DEFAULT_SETTLE_DOWN_SECS: f64 = 0.0;
 
 /// Grbl realtime soft reset (Ctrl-X).
 const SOFT_RESET: u8 = 0x18;
@@ -57,6 +80,29 @@ impl std::fmt::Display for Pen {
     }
 }
 
+/// How a pen move is fenced off from the XY motion around it (§2.5).
+///
+/// `ok` means "queued", not "drawn", so without a fence Grbl's look-ahead
+/// carries speed through the corner between the last drawn segment and the Z
+/// move, and the pen draws a hook as it lifts. The fence is whatever makes the
+/// host wait for the motion to be *over* — and which of these actually does
+/// that on DrawCore is a question for the machine, not for us:
+/// `cargo run --example fence` asks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PenFence {
+    /// No fence: the Z move joins the planner queue like any other block.
+    /// Fastest, and what the machine did before 2026-09-02.
+    Off,
+    /// `G4` dwells around the Z move. Grbl runs a dwell only once the planner
+    /// buffer has emptied — *if* the firmware implements it that way.
+    #[default]
+    Dwell,
+    /// Poll `?` until the machine reports `Idle`. Slower per pen move than a
+    /// dwell, but it asks about the state rather than trusting a side effect.
+    Poll,
+}
+
 /// Pen geometry and speeds. Defaults are the iDraw ones from DESIGN.org §10;
 /// machine profiles (step 5.1) will supply them per machine.
 #[derive(Debug, Clone, Copy)]
@@ -69,13 +115,21 @@ pub struct PenSettings {
     pub z_feed: u32,
     /// Feed rate XY travel should use afterwards, mm/min.
     pub xy_feed: u32,
-    /// How long to hold still after the pen's Z move, seconds.
+    /// How long to hold still after *lifting*, seconds.
     ///
-    /// The Z move is *finished* by then — the dwell that carries this waits
-    /// for the planner (see [`Driver::set_pen`]) — so this is only the pen
-    /// itself: a spring-loaded holder bounces on landing and swings after a
-    /// lift. Zero is legal and still leaves the wait for the Z move.
-    pub settle_secs: f64,
+    /// The Z move is finished by then — the dwell that carries this waits for
+    /// the planner (see [`Driver::set_pen`]) — so this is only the pen itself
+    /// swinging. Zero is legal and still leaves the wait for the Z move.
+    pub settle_up_secs: f64,
+    /// How long to hold still after *landing*, seconds.
+    ///
+    /// Split from the lift because the two are not the same trade at all: this
+    /// one is time with the tip on the paper and nothing moving, so every
+    /// millisecond of it feeds the dot at the start of a stroke. Raise it only
+    /// if strokes start too faint to read.
+    pub settle_down_secs: f64,
+    /// What holds the XY motion off while the pen moves.
+    pub fence: PenFence,
 }
 
 impl Default for PenSettings {
@@ -85,7 +139,9 @@ impl Default for PenSettings {
             down_z: 5.0,
             z_feed: 5000,
             xy_feed: 2000,
-            settle_secs: DEFAULT_PEN_SETTLE_SECS,
+            settle_up_secs: DEFAULT_SETTLE_UP_SECS,
+            settle_down_secs: DEFAULT_SETTLE_DOWN_SECS,
+            fence: PenFence::default(),
         }
     }
 }
@@ -364,6 +420,24 @@ impl Driver {
         Ok(())
     }
 
+    /// Write one Grbl setting (`$<n>=<value>`).
+    ///
+    /// This persists in the board's EEPROM, so it outlives the program and
+    /// every other sender — which is the point. `$120` and `$11` ship at Grbl
+    /// defaults meant for a tool held rigidly in a spindle, and a pen on a
+    /// sprung holder at the end of an A0 gantry is not that (§2.5). Getting
+    /// them right by hand, in a console, and then remembering what was set,
+    /// turned out to be the part that kept going wrong; a config file that
+    /// says what the machine should be does not forget.
+    ///
+    /// Only ever called for values the user named explicitly, and only when
+    /// the board disagrees — an EEPROM write per startup is nothing, one per
+    /// pen move would not be.
+    pub fn write_setting(&mut self, number: u16, value: f64) -> Result<(), DriverError> {
+        tracing::info!(setting = number, value, "writing a firmware setting");
+        self.command(&format!("${number}={value}"))
+    }
+
     /// Set the modal feed rate (mm/min) for subsequent moves.
     pub fn set_feed(&mut self, feed: u32) -> Result<(), DriverError> {
         self.command(&format!("G1 F{feed}"))
@@ -445,11 +519,19 @@ impl Driver {
     ///
     /// So the order the operator expects — finish the line, *then* lift, *then*
     /// travel — has to be asked for. `G4` is how: Grbl runs a dwell only once
-    /// the planner buffer has emptied, which makes the one before the Z move a
-    /// "the line is really drawn" barrier and the one after it "the pen is
-    /// really up", with [`PenSettings::settle_secs`] of stillness on top for
-    /// the pen to stop swinging. The cost is a real stop and two round trips
-    /// per pen move; that is what a clean line end costs.
+    /// the planner buffer has emptied (measured: it held 4.336 s for a 4.0 s
+    /// move, §2.5), which makes the one *before* the Z move a "the line is
+    /// really drawn" barrier.
+    ///
+    /// There is deliberately no barrier *after* the Z move unless a settle
+    /// asks for one. Ordering does not need it — Grbl runs the queued blocks
+    /// in order, so the next XY move starts when the Z move ends either way —
+    /// and waiting for it costs a round trip with the pen already at its new
+    /// height. On this machine that was measured at *298 ms standing still on
+    /// the paper* before every stroke (§2.7): a quarter of a second for the
+    /// ink to pool into a dot, and half an hour across a big plot. A settle is
+    /// the one thing only a barrier can give, so it is the one thing that
+    /// brings the barrier back.
     ///
     /// The final line matters too: `F` is modal in Grbl, so without it every
     /// following XY move would inherit the fast Z feed (§2.2).
@@ -458,11 +540,92 @@ impl Driver {
             tracing::debug!(pen = %target, "pen already there");
             return Ok(());
         }
-        self.drain()?;
-        self.move_pen_now(target)?;
-        self.dwell(self.settings.settle_secs.max(0.0))?;
+        let settle = match target {
+            Pen::Up => self.settings.settle_up_secs,
+            Pen::Down => self.settings.settle_down_secs,
+        }
+        .max(0.0);
+        match self.settings.fence {
+            PenFence::Off => {
+                self.move_pen_now(target)?;
+            }
+            PenFence::Dwell => {
+                self.drain()?;
+                self.move_pen_now(target)?;
+                if settle > 0.0 {
+                    // One dwell does both jobs: it waits out the Z move, then
+                    // holds still for the settle.
+                    self.dwell(settle)?;
+                }
+            }
+            PenFence::Poll => {
+                self.wait_idle()?;
+                self.move_pen_now(target)?;
+                if settle > 0.0 {
+                    self.wait_idle()?;
+                    // The machine is stopped and we know it, so the settle is
+                    // the host's to wait out — asking the board for a dwell
+                    // would put the same trust back in `G4` that this variant
+                    // exists to avoid.
+                    std::thread::sleep(Duration::from_secs_f64(settle));
+                }
+            }
+        }
         self.command(&format!("G1 F{}", self.settings.xy_feed))?;
         Ok(())
+    }
+
+    /// Block until the machine reports `Idle` — the barrier `G4` is only
+    /// *assumed* to be.
+    ///
+    /// Grbl answers `?` at any time with `<State|MPos:…>`, and `Idle` means the
+    /// planner is empty and the steppers are stopped. That is a question about
+    /// the state rather than a side effect of a command, which is why this is
+    /// the fallback when a dwell turns out not to wait.
+    ///
+    /// [`IDLE_STREAK`] reports are needed because a single one can be stale:
+    /// the state lags `ok` by a moment. That narrows the race rather than
+    /// closing it — a firmware that reported `Idle` for longer than the streak
+    /// takes would still slip through, and the only airtight answer would be
+    /// the planner-block count in `Bf:`, which needs `$10` changed on the
+    /// machine.
+    pub fn wait_idle(&mut self) -> Result<(), DriverError> {
+        let deadline = Instant::now() + DRAIN_TIMEOUT;
+        let mut streak = 0;
+        while Instant::now() < deadline {
+            self.connection.transport.write_realtime(b'?')?;
+            match self.read_status()? {
+                Some(state) if state == "Idle" => {
+                    streak += 1;
+                    if streak >= IDLE_STREAK {
+                        return Ok(());
+                    }
+                }
+                // Anything else — `Run`, `Hold`, or no answer at all — starts
+                // the count again.
+                _ => streak = 0,
+            }
+            std::thread::sleep(POLL_GAP);
+        }
+        tracing::warn!("machine never reported Idle; giving up on the fence");
+        Err(DriverError::Timeout {
+            command: "?".to_owned(),
+        })
+    }
+
+    /// Read the state field of the next status report, if one arrives.
+    fn read_status(&mut self) -> Result<Option<String>, DriverError> {
+        let deadline = Instant::now() + POLL_WINDOW;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.connection.transport.read_line_for(left)? {
+                Some(line) if line.starts_with('<') => return Ok(Some(state_of(&line).to_owned())),
+                // Not a report: an `ok` we did not ask for, an alarm, a banner.
+                // Logged and skipped — a fence is not the place to fail on it.
+                Some(line) => tracing::debug!(%line, "unsolicited line while polling"),
+                None => return Ok(None),
+            }
+        }
     }
 
     /// The pen's Z move on its own: queued behind whatever is already in the
@@ -515,6 +678,14 @@ impl Driver {
             }
         }
     }
+}
+
+/// The state field of a `<Idle|MPos:…>` report, without any sub-state: `Idle`,
+/// `Run`, `Hold` (from `Hold:0`), and so on.
+fn state_of(report: &str) -> &str {
+    let body = report.trim_start_matches('<');
+    let field = body.split(['|', '>']).next().unwrap_or("");
+    field.split(':').next().unwrap_or("")
 }
 
 #[cfg(test)]
@@ -688,6 +859,16 @@ mod tests {
             "the panic path may only lift, then reset"
         );
         assert_eq!(d.pen(), Pen::Up);
+    }
+
+    #[test]
+    fn a_status_report_yields_its_state_without_the_sub_state() {
+        assert_eq!(state_of("<Idle|MPos:0.000,0.000,0.000|FS:0,0>"), "Idle");
+        assert_eq!(state_of("<Run|MPos:6.010,0.000,0.501|FS:300,0>"), "Run");
+        // `Hold:0` is still a hold; the reason is not our business here.
+        assert_eq!(state_of("<Hold:0|MPos:7.740,0.000,0.501|FS:0,0>"), "Hold");
+        assert_eq!(state_of("<Idle>"), "Idle");
+        assert_eq!(state_of("ok"), "ok");
     }
 
     #[test]
