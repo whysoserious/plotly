@@ -37,9 +37,14 @@ const MODELS: &[(&str, f64, f64)] = &[
 
 /// Grbl setting numbers we care about (`$$`, §15.1).
 mod grbl {
+    /// Junction deviation, mm — how far off a corner the planner may cut.
+    pub const JUNCTION_DEVIATION: u16 = 11;
     /// Max XY feed rates, mm/min.
     pub const MAX_RATE_X: u16 = 110;
     pub const MAX_RATE_Y: u16 = 111;
+    /// Acceleration per axis, mm/s².
+    pub const ACCEL_X: u16 = 120;
+    pub const ACCEL_Y: u16 = 121;
     /// Maximum travel per axis, mm — the drawable field.
     pub const TRAVEL_X: u16 = 130;
     pub const TRAVEL_Y: u16 = 131;
@@ -59,6 +64,13 @@ pub struct Profile {
     /// other XY feed is clamped to it, so neither a profile nor a slip in a
     /// config file can ask the carriage for more than it has.
     pub max_feed: u32,
+    /// Acceleration, mm/s² (`$120`/`$121`). Only the time estimate uses it —
+    /// the firmware does its own planning — but it is what makes the estimate
+    /// track the machine instead of a constant (step 5.3).
+    pub accel_mm_s2: f64,
+    /// Junction deviation, mm (`$11`): how far off a corner the planner may
+    /// cut, and so how much speed it may carry through one.
+    pub junction_deviation_mm: f64,
 }
 
 /// Fallback XY speed limit when the firmware has not told us one: the slower of
@@ -68,6 +80,12 @@ const DEFAULT_MAX_FEED: u32 = 12_000;
 /// Jog feed, well under the machine maximum so a held arrow key cannot slam the
 /// carriage at full speed.
 pub const DEFAULT_JOG_FEED: u32 = 3_000;
+
+/// Fallback acceleration: our machine's `$120`/`$121` (§15.1).
+const DEFAULT_ACCEL_MM_S2: f64 = 3_000.0;
+
+/// Fallback junction deviation: Grbl's own default for `$11`.
+const DEFAULT_JUNCTION_DEVIATION_MM: f64 = 0.01;
 
 impl Profile {
     /// The built-in profile called `name`, if there is one.
@@ -85,6 +103,8 @@ impl Profile {
             plan: PlanSettings::default(),
             jog_feed: DEFAULT_JOG_FEED,
             max_feed: DEFAULT_MAX_FEED,
+            accel_mm_s2: DEFAULT_ACCEL_MM_S2,
+            junction_deviation_mm: DEFAULT_JUNCTION_DEVIATION_MM,
         })
     }
 
@@ -104,19 +124,22 @@ impl Profile {
         if let Some(height) = reported.get(grbl::TRAVEL_Y) {
             self.field.height_mm = height;
         }
-        let rates: Vec<f64> = [grbl::MAX_RATE_X, grbl::MAX_RATE_Y]
-            .iter()
-            .filter_map(|n| reported.get(*n))
-            .collect();
-        if let Some(slowest) = rates.iter().copied().reduce(f64::min) {
-            if slowest > 0.0 {
-                self.max_feed = slowest as u32;
-            }
+        // Both axes have to keep up, so the slower one is the limit.
+        if let Some(slowest) = slowest_of(reported, grbl::MAX_RATE_X, grbl::MAX_RATE_Y) {
+            self.max_feed = slowest as u32;
+        }
+        if let Some(slowest) = slowest_of(reported, grbl::ACCEL_X, grbl::ACCEL_Y) {
+            self.accel_mm_s2 = slowest;
+        }
+        if let Some(deviation) = reported.get(grbl::JUNCTION_DEVIATION).filter(|d| *d > 0.0) {
+            self.junction_deviation_mm = deviation;
         }
         tracing::debug!(
             width_mm = self.field.width_mm,
             height_mm = self.field.height_mm,
             max_feed = self.max_feed,
+            accel_mm_s2 = self.accel_mm_s2,
+            junction_deviation_mm = self.junction_deviation_mm,
             "field and limits taken from the firmware"
         );
     }
@@ -129,6 +152,7 @@ impl Profile {
             pen_up_z,
             pen_down_z,
             pen_z_feed,
+            pen_settle_secs,
             draw_feed,
             travel_feed,
             jog_feed,
@@ -141,6 +165,11 @@ impl Profile {
         set(&mut self.pen.up_z, pen_up_z);
         set(&mut self.pen.down_z, pen_down_z);
         set(&mut self.pen.z_feed, pen_z_feed);
+        // A negative settle would make the dwell an `error:` from the board.
+        set(
+            &mut self.pen.settle_secs,
+            pen_settle_secs.map(|s| s.max(0.0)),
+        );
         set(&mut self.plan.draw_feed, draw_feed);
         set(&mut self.plan.travel_feed, travel_feed);
         set(&mut self.jog_feed, jog_feed);
@@ -180,6 +209,16 @@ impl Profile {
             self.name, self.field.width_mm, self.field.height_mm
         )
     }
+}
+
+/// The slower of two per-axis settings, ignoring anything absent or nonsense —
+/// a zero limit would clamp the machine to a standstill.
+fn slowest_of(reported: &GrblSettings, x: u16, y: u16) -> Option<f64> {
+    [x, y]
+        .iter()
+        .filter_map(|n| reported.get(*n))
+        .filter(|v| *v > 0.0)
+        .reduce(f64::min)
 }
 
 /// Overwrite `target` when the override carries a value.
@@ -378,6 +417,25 @@ mod tests {
     }
 
     /// The Z axis has its own limit, so an XY cap must not slow the pen lift.
+    /// The settle is the one pen number a user is expected to tune by eye, so
+    /// it has to survive the TOML — and a negative one must not reach the board
+    /// as a `G4 P-…`.
+    #[test]
+    fn the_pen_settle_comes_from_the_config_and_never_goes_negative() {
+        let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        profile.apply_override(&ProfileOverride {
+            pen_settle_secs: Some(0.12),
+            ..Default::default()
+        });
+        assert_eq!(profile.pen.settle_secs, 0.12);
+
+        profile.apply_override(&ProfileOverride {
+            pen_settle_secs: Some(-1.0),
+            ..Default::default()
+        });
+        assert_eq!(profile.pen.settle_secs, 0.0);
+    }
+
     #[test]
     fn clamping_leaves_the_pens_z_feed_alone() {
         let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();

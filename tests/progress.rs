@@ -82,7 +82,7 @@ fn ink_of_an_uninterrupted_run(plan: &Plan) -> Vec<String> {
         start_index: 0,
     });
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::PlanDone) {
+        if matches!(event, Event::PlanDone { .. }) {
             break;
         }
     }
@@ -121,7 +121,7 @@ fn a_finished_plan_leaves_a_complete_progress_file() {
     // Wait for completion.
     let mut done = false;
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::PlanDone) {
+        if matches!(event, Event::PlanDone { .. }) {
             done = true;
             break;
         }
@@ -243,7 +243,7 @@ fn a_paused_job_resumes_in_a_later_run_and_draws_the_same_ink() {
     });
     let mut finished = false;
     while let Some(event) = second.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::PlanDone) {
+        if matches!(event, Event::PlanDone { .. }) {
             finished = true;
             break;
         }

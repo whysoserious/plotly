@@ -157,12 +157,15 @@ pub fn build_plan(
 
     let settings = profile.plan;
     let job = plan::Plan::build_shapes(shapes, &placement, &settings);
+    let dry_run = job.estimate(&plan::estimate::Machine::from_profile(profile));
     tracing::debug!(
         ops = job.ops.len(),
         strokes = job.stroke_count(),
         moves = job.move_count(),
         labelled = job.stroke_labels().len(),
-        draw_mm = job.total_stroke_length_mm(),
+        draw_mm = dry_run.draw_mm,
+        travel_mm = dry_run.travel_mm,
+        est_secs = dry_run.secs,
         cap_mm = settings.max_segment_mm,
         "plan built"
     );

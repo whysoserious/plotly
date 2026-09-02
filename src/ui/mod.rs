@@ -9,6 +9,20 @@ use ratatui::Frame;
 
 use crate::app::App;
 
+/// Seconds as `m:ss`, or `h:mm:ss` once there is an hour to show — an A0 plot
+/// runs for hours, and `128:07` is not a time anyone reads at a glance.
+///
+/// Lives here rather than in a panel because the status bar, the finished-plan
+/// note and the estimate all have to spell a duration the same way.
+pub(crate) fn fmt_time(secs: f64) -> String {
+    let secs = secs.max(0.0).round() as u64;
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    match h {
+        0 => format!("{m}:{s:02}"),
+        h => format!("{h}:{m:02}:{s:02}"),
+    }
+}
+
 /// Width of the stroke list when it shares the canvas row.
 const STROKES_WIDTH: u16 = 30;
 
@@ -95,5 +109,18 @@ mod tests {
     #[test]
     fn the_list_switched_off_leaves_the_row_alone() {
         assert_eq!(split_canvas_row(Rect::new(0, 3, 200, 20), false), None);
+    }
+
+    #[test]
+    fn a_duration_grows_an_hours_field_only_when_it_needs_one() {
+        assert_eq!(fmt_time(0.0), "0:00");
+        assert_eq!(fmt_time(12.4), "0:12");
+        assert_eq!(fmt_time(59.6), "1:00");
+        assert_eq!(fmt_time(3599.0), "59:59");
+        // An A0 plot runs for hours; `128:07` is not a readable time.
+        assert_eq!(fmt_time(3600.0), "1:00:00");
+        assert_eq!(fmt_time(7687.0), "2:08:07");
+        // A negative duration is nonsense, not a panic.
+        assert_eq!(fmt_time(-5.0), "0:00");
     }
 }

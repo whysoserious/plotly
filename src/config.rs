@@ -54,6 +54,9 @@ pub struct ProfileOverride {
     pub pen_down_z: Option<f32>,
     /// Feed for the pen's own Z move, mm/min.
     pub pen_z_feed: Option<u32>,
+    /// Stillness after the pen's Z move, seconds — raise it if a spring-loaded
+    /// holder still marks the paper as it lifts.
+    pub pen_settle_secs: Option<f64>,
     /// Feed while drawing, mm/min.
     pub draw_feed: Option<u32>,
     /// Feed while travelling with the pen up, mm/min.
@@ -168,6 +171,7 @@ mod tests {
             pen_up_z = 0.4
             pen_down_z = 5.2
             pen_z_feed = 4000
+            pen_settle_secs = 0.08
             draw_feed = 1800
             travel_feed = 7000
             jog_feed = 2500
@@ -183,6 +187,7 @@ mod tests {
         assert_eq!(o.pen_up_z, Some(0.4));
         assert_eq!(o.pen_down_z, Some(5.2));
         assert_eq!(o.pen_z_feed, Some(4000));
+        assert_eq!(o.pen_settle_secs, Some(0.08));
         assert_eq!(o.draw_feed, Some(1800));
         assert_eq!(o.travel_feed, Some(7000));
         assert_eq!(o.jog_feed, Some(2500));

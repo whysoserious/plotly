@@ -60,8 +60,8 @@ jednostek krokowych. Poniższa tabela jest już potwierdzona sprzętowo, o ile n
 |---------+---------+------+-------|
 | Ruch liniowy XY | ~G1 X<x> Y<y> F<feed>~ | ✔ | *~G90~ abs w mm, i to jest domyślny stan firmware'u.* Płytka planuje przyspieszenia sama |
 | Szybki przejazd | ~G0 X<x> Y<y>~ | ❓ | pen-up transit; nie testowane w spike'u, ale to standardowy Grbl |
-| Pen DOWN | ~G1 G90 Z<down> F<rate>~ | ✔ | ~Z=5~ w dół; ~rate~≈5000. *Po nim leci jeszcze ~G1 F<feed_xy>~* (ustawia feed XY!) |
-| Pen UP | ~G1 G90 Z<up> F<rate>~ | ✔ | ~Z=0.5~ w górę (większe Z = niżej). Też + ~G1 F<feed_xy>~ |
+| Pen DOWN | ~G1 G90 Z<down> F<rate>~ | ✔ | ~Z=5~ w dół; ~rate~≈5000. *Po nim leci jeszcze ~G1 F<feed_xy>~* (ustawia feed XY!). *Ogrodzone ~G4~ z obu stron — 2.5* |
+| Pen UP | ~G1 G90 Z<up> F<rate>~ | ✔ | ~Z=0.5~ w górę (większe Z = niżej). Też + ~G1 F<feed_xy>~, też ogrodzone (2.5) |
 | Toggle pen | ~$TP<up>,<down>~ | ✔ | np. ~$TP0.5,5.0~ (poprzedzone ~G90 G1 F<speed>~) |
 | Laser / serwo PWM | ~G1 F<f> M3 S<val>~ / ~M5~ | ✔ | ~M5~ przyjmowane (~ok~); ~$32=1~ → laser mode włączony |
 | Dwell | ~G4 P<sekundy>~ | ❓ | w referencji *zakomentowane* (no-op); w Grblu 1.1 P=sekundy |
@@ -181,6 +181,39 @@ mniejsza, więc centrowanie było złym domyślnym.
   osobna robota hosta, punkt A powyżej).
 - To de facto realizuje „set origin" z kroku 5.4 w wersji bez osobnego klawisza: originem
   jest tam, gdzie stoi głowica.
+
+** 2.5 Ogrodzenie ruchu pióra — dlaczego linia nie kończy się haczykiem (2026-09-02)
+*Objaw (sprzęt):* koniec każdej kreski jest lekko zagięty *w stronę następnego przejazdu* —
+pióro „zaczyna skręcać, zanim skończy rysować". Symetrycznie: przy opuszczaniu zostaje
+kropka/dziobek na starcie kształtu.
+
+*Przyczyna.* ~ok~ znaczy „przyjęto do bufora", nie „narysowano" (15.1). Cztery linie ruchu
+pióra same z siebie tylko dołączają do kolejki planera, a *lookahead Grbla przenosi prędkość
+przez róg* między ostatnim odcinkiem kreski a ruchem Z: junction deviation ~$11 = 0.010~ przy
+~$120 = 3000~ mm/s² daje na kącie prostym ~v = sqrt(a·δ·sin(θ/2)/(1−sin(θ/2))) ≈ 8,5 mm/s~,
+zabrane *natychmiast* w bok. Tak ostro maszyna nie skręca: pasek i uchwyt pióra się uginają
+i końcówka — *wciąż na papierze* — rysuje mały haczyk w stronę, w którą zaraz pojedzie.
+To nie jest błąd geometrii (Grbl trzyma ścieżkę dokładnie), tylko mechanika rogu branego
+z prędkością.
+
+*Lekarstwo — kolejność wymuszona ~G4~* (~Driver::set_pen~). Grbl wykonuje dwell *dopiero po
+opróżnieniu bufora planera*, więc dwell jest barierą „naprawdę zrobione":
+#+begin_example
+G4 P0.01                 <- kreska jest naprawdę narysowana (pełny stop)
+G1 G90 Z<z> F<z_feed>    <- dopiero teraz pióro się rusza
+G4 P<pen_settle_secs>    <- Z skończone + pióro przestało dyndać
+G1 F<xy_feed>            <- i wracamy do feedu XY
+#+end_example
+Koszt: realny stop i dwa round-tripy na każdy ruch pióra. Tyle kosztuje czysty koniec linii —
+i tak właśnie *od początku liczy estymata* (8.1: run zaczyna i kończy się w bezruchu).
+- ~pen_settle_secs~ (domyślnie *0,05 s*) jest w profilu i w ~config.toml~ — jedyna liczba
+  pióra bez oparcia w ~$$~. Sam ruch Z jest już wtedy skończony (pilnuje tego ~G4~), więc to
+  wyłącznie mechanika: sprężynujący uchwyt.
+- *Ścieżka panic (~Ctrl-C~) omija bariery* (~Driver::move_pen_now~): nie może czekać, aż
+  wyjedzie bufor z sekundami przejazdu.
+- To domyka ❓ z 15.3: *jeśli haczyk znika, ~G4~ naprawdę synchronizuje* — a jeśli nie
+  znika, firmware odpowiada na ~G4~ przedwcześnie i barierą musi zostać odpytywanie ~?~
+  do ~Idle~.
 
 * 3. Funkcje
 ** 3.1 MVP
@@ -504,11 +537,11 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~m~ | stop po dystansie: off / 50 / 100 / 500 cm (stop + pen up) |
 | ~h~ | home (~$H~) |
 | ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
-| ~o~ | set origin (work offset) |
-| ~f~ | frame — obrysuj bounding box pracy (pen-up) |
+| ~o~ | ~~set origin~~ — *niepotrzebne*: originem jest pozycja głowicy przy ~Enter~ (2.4 pkt C) |
+| ~f~ | frame — obrysuj bbox *rysowanej* geometrii z podniesionym piórem (5.3) |
 | ~g~ | go-to XY (wpisz współrzędne) |
-| ~Esc~ | pause (feed-hold ~!~ ✔ realtime — 2.7); w konsoli zamyka konsolę |
-| ~r~ | resume (cycle-start =~= ✔ realtime) |
+| ~Esc~ | pause — *kooperatywna, na granicy kształtu* (nie feed-hold; sekcja 9) |
+| ~r~ | resume; wciśnięte *przed* wejściem pauzy — odwołuje ją |
 | ~S~ | *STOP* planu + pen up (kooperatywnie między op) |
 | ~Ctrl-C~ / ~Ctrl-X~ | *panic STOP*: pen up + soft-reset ~0x18~ — zawsze aktywny, też w konsoli |
 | ~s~ | pokaż/ukryj listę kształtów (panel „Strokes" — 3.7) |
@@ -521,6 +554,43 @@ ale w polach tekstowych (konsola ~c~ — np. ~M3 S100~; go-to ~g~; nickname) mus
 *wyłączone* — inaczej ~S~ z komendy ~M3 S100~ wywoła STOP. Dlatego *panic STOP ma osobny,
 niełapany-w-tekście skrót* (np. ~Ctrl-C~/~Ctrl-X~) działający we wszystkich trybach, niezależnie
 od ~S~.
+
+** 8.1 Frame (~f~) i estymata czasu — implementacja (krok 5.3)
+*Frame* = ~Command::Frame~ w workerze: pióro w górę, feed = ~travel_feed~ z profilu, przejazd
+po 5 punktach (~Plan::frame_outline~ — 4 rogi + powrót). *Nie jest jobem*: nic nie rysuje,
+nic nie checkpointuje, nie rusza panelu „Strokes". Na A0 to metry przejazdu, więc jest
+*przerywalny* tak samo jak plan (~S~ / panic działają między ruchami).
+- Bbox liczy ~Plan::drawn_bounds~ — *tylko segmenty pen-down*. Wliczenie dojazdu z pozycji
+  głowicy obrysowałoby podróż, nie rysunek.
+- ~f~ najpierw *przekłada plan pod głowicę* (jak ~Enter~), więc obrys pokazuje dokładnie to,
+  co narysuje ~Enter~ wciśnięty zaraz potem. Gdy rysunek wystaje poza pole — nota w UI, nie
+  tylko ~WARN~ w logu (operator patrzy na ekran, nie na log).
+
+*Estymata* — ~plan/estimate.rs~. Dzielenie długości przez feed to nie estymata, tylko dolne
+ograniczenie: głowica rusza z miejsca przy *każdym* kształcie i hamuje w *każdym* rogu.
+Model idzie za planerem firmware'u:
+1. ops dzielone na *runy* — ciąg ruchów przy jednym feedzie, bez ruchu pióra w środku; run
+   zaczyna i kończy się w bezruchu (pen-move musi poczekać, aż ruch stanie);
+2. w runie każde złącze dostaje *limit prędkości z kąta zakrętu* — reguła junction-deviation
+   Grbla (~$11~): na wprost bez limitu, kąt prosty drogo, zawrót = pełny stop;
+3. *przebieg w przód i w tył* ustala prędkość w każdym punkcie, żeby żaden odcinek nie musiał
+   hamować mocniej, niż maszyna potrafi;
+4. każdy odcinek liczony jako trapez (albo trójkąt, gdy nie zdąży rozpędzić się do feedu).
+Do tego czas ruchu Z pióra (z profilu) + ~PEN_SETTLE_SECS~ — *jedyna liczba bez oparcia
+w ~$$~*, do kalibracji, gdy estymata odjedzie na rysunkach z wieloma krótkimi kreskami.
+Model jest wciąż *optymistyczny* (ignoruje skończony lookahead planera i mechanikę), ale
+skaluje się z profilem zamiast być stałą.
+
+*Po wydruku — ile trwał* (życzenie użytkownika, 2026-09-02). ~Event::PlanDone~ niesie
+~elapsed_secs~, a status pokazuje ~done in 1:12:30~ w miejscu, gdzie przed chwilą był licznik
+na żywo. Zegar startuje razem z planem (*po* preambule wznawiania), więc na wznowionym jobie
+to czas *tego* przebiegu — czas ścienny przez pauzę jest czasem operatora, nie plotera.
+Ta sama liczba leci do logu (~INFO plan done secs=…~). Format czasu jest teraz wspólny
+(~ui::fmt_time~) i dostaje pole godzin, gdy jest co pokazywać: ~128:07~ nikt nie czyta.
+
+/Rząd wielkości (~example.svg~, 6312 kształtów):/ 161 m tuszu, 163 m przejazdów, ~2 h 08.
+Dominują *pen-move'y* (6312 × 2) i przejazdy — dokładnie to, czego naiwna estymata nie widzi.
+Przejazdy ≈ długość rysunku, bo kolejność ścieżek jest z pliku (5.2 → vpype).
 
 * 9. Stop / stop po czasie / stop + pen up po czasie
 *Droga A wybrana* — spike 0.7 potwierdził realtime (~!~, =~=, ~0x18~, ~0x85~; 15.1).
@@ -929,5 +999,7 @@ pierwszy) — po połączeniu *jawnie* wysyłamy ~G21 G90~ i znany feed.
   firmware odpowiadał wcześniej, checkpoint pauzy byłby optymistyczny — nigdy niebezpieczny:
   op są absolutne, więc ponowne wysłanie trafia w to samo miejsce. *Do weryfikacji na sprzęcie
   razem z 3.4:* pauza → ~?~ powinno pokazać ~Idle~ zaraz po ~ok~ z ~G4~.
+  /Od 2026-09-02 ten sam ❓ ma drugi, znacznie czulszy test:/ ogrodzenie ruchu pióra (2.5)
+  stoi wprost na tym założeniu — *znikający haczyk na końcu kreski = ~G4~ synchronizuje*./
 - Obsługa ~error:<n>~/~ALARM~ w runtime, timeouty, retry, detekcja utraty USB w trakcie druku.
 - Czy ~$SLP~ gubi pozycję (po ~0x18~ jej nie gubi) — istotne dla wznawiania (6).

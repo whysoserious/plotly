@@ -64,7 +64,7 @@ fn wait_for_end(worker: &Worker) -> (Option<Event>, usize) {
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         match event {
             Event::Progress { done, .. } => last_done = done,
-            Event::PlanDone | Event::Aborted => return (Some(event), last_done),
+            Event::PlanDone { .. } | Event::Aborted => return (Some(event), last_done),
             _ => {}
         }
     }
@@ -222,7 +222,10 @@ fn resume_after_a_pause_finishes_the_plan() {
     worker.send(Command::Resume);
     let (end, done) = wait_for_end(&worker);
 
-    assert!(matches!(end, Some(Event::PlanDone)), "expected PlanDone");
+    assert!(
+        matches!(end, Some(Event::PlanDone { .. })),
+        "expected PlanDone"
+    );
     assert!(done >= paused_at, "progress went backwards after resume");
 
     worker.shutdown();
@@ -251,7 +254,7 @@ fn resume_before_the_shape_ends_calls_the_pause_off() {
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         match event {
             Event::Paused { .. } => held = true,
-            Event::PlanDone => {
+            Event::PlanDone { .. } => {
                 finished = true;
                 break;
             }

@@ -4,8 +4,10 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
+use super::fmt_time;
 use crate::app::{Activity, App};
 use crate::keys::{Binding, CONSOLE_BINDINGS, NAVIGATION_BINDINGS};
+use crate::plan::estimate::Estimate;
 
 /// Connection / job status: identity, what the machine is doing, and the last
 /// plan result. While drawing it shows live time, travel and the estimated
@@ -13,7 +15,21 @@ use crate::keys::{Binding, CONSOLE_BINDINGS, NAVIGATION_BINDINGS};
 pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     let machine = app.machine();
     let activity = match app.activity() {
-        Activity::Idle => format!("pen {}, jog {} mm", machine.pen, app.jog_step_mm()),
+        Activity::Idle => format!(
+            "pen {}, jog {} mm{}",
+            machine.pen,
+            app.jog_step_mm(),
+            // What the loaded drawing will cost, before committing paper to it.
+            match app.estimate() {
+                Some(est) => format!(
+                    " · est {} · {} ink, {} travel",
+                    fmt_time(est.secs),
+                    fmt_dist(est.draw_mm),
+                    fmt_dist(est.travel_mm)
+                ),
+                None => String::new(),
+            }
+        ),
         Activity::Busy(label) => format!("{label}…"),
         Activity::Drawing {
             done,
@@ -48,13 +64,13 @@ fn drawing_line(
     total: usize,
     distance_mm: f64,
     elapsed_secs: f64,
-    estimate: Option<(f64, f64)>,
+    estimate: Option<Estimate>,
 ) -> String {
     let pct = match total {
         0 => 0,
         total => done * 100 / total,
     };
-    let (total_mm, est_secs) = estimate.unwrap_or((0.0, 0.0));
+    let (total_mm, est_secs) = estimate.map_or((0.0, 0.0), |e| (e.total_mm(), e.secs));
     format!(
         "drawing {pct}% · {} / ~{} · {} / {}",
         fmt_time(elapsed_secs),
@@ -78,12 +94,6 @@ fn cutoffs_line(app: &App) -> String {
     } else {
         format!(" [{}]", parts.join(", "))
     }
-}
-
-/// Seconds as `m:ss`.
-fn fmt_time(secs: f64) -> String {
-    let secs = secs.max(0.0).round() as u64;
-    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// Millimetres as `NNmm (NNcm)`, or metres past a metre.
@@ -198,7 +208,17 @@ mod tests {
 
     #[test]
     fn the_drawing_line_carries_percent_time_and_travel() {
-        let line = drawing_line(45, 180, 412.0, 3.0, Some((1240.0, 12.0)));
+        let line = drawing_line(
+            45,
+            180,
+            412.0,
+            3.0,
+            Some(Estimate {
+                secs: 12.0,
+                draw_mm: 1000.0,
+                travel_mm: 240.0,
+            }),
+        );
         assert!(line.contains("25%"), "{line}");
         assert!(line.contains("0:03 / ~0:12"), "{line}");
         assert!(line.contains("41.2cm"), "{line}");

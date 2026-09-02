@@ -15,6 +15,7 @@ use ratatui::Terminal;
 use crate::job::{self, Job, Resumable};
 use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
+use crate::plan::estimate::{self, Estimate};
 use crate::plan::{Plan, Shape};
 use crate::plotter::worker::{Command, Event, MachineState, Worker};
 use crate::profiles::Profile;
@@ -77,8 +78,8 @@ pub struct App {
     shapes: Vec<Shape>,
     /// The plan to draw, placed into machine coordinates; `Enter` draws it.
     plan: Option<Plan>,
-    /// Cached plan estimate: total travel (mm) and time (s), for the ETA.
-    estimate: Option<(f64, f64)>,
+    /// Cached dry-run of the plan: time and distances, for the ETA (step 5.3).
+    estimate: Option<Estimate>,
     /// Source SVG path, recorded in a job's metadata (§6).
     source: Option<String>,
     /// The job directory for the current print, created when it starts (§3.1).
@@ -127,9 +128,8 @@ impl App {
         // rebuilt when the plot starts, so jogging first moves the drawing.
         let plan =
             (!shapes.is_empty()).then(|| crate::build_plan(&shapes, machine.position, &profile));
-        let estimate = plan
-            .as_ref()
-            .map(|p| (p.total_distance_mm(), p.estimated_secs()));
+        let dry_run = estimate::Machine::from_profile(&profile);
+        let estimate = plan.as_ref().map(|p| p.estimate(&dry_run));
         Self {
             worker,
             machine,
@@ -247,12 +247,15 @@ impl App {
                     self.activity =
                         Activity::Busy(format!("paused {done}/{total}, pen up (r resume)"));
                 }
-                Event::PlanDone => {
+                Event::PlanDone { elapsed_secs } => {
                     self.pausing = false;
                     if let Some(plan) = &self.plan {
                         self.ops_done = plan.ops.len();
                     }
-                    self.note = Some("done".to_owned());
+                    // How long it took is the first thing asked once a plot
+                    // ends, and by then the live counter is gone from the
+                    // status bar — so the note keeps the number on screen.
+                    self.note = Some(format!("done in {}", ui::fmt_time(elapsed_secs)));
                 }
                 Event::Aborted => {
                     self.pausing = false;
@@ -358,6 +361,7 @@ impl App {
             }
             Action::StepSmaller => self.step_index = self.step_index.saturating_sub(1),
             Action::StartPlot => self.start_plot(),
+            Action::Frame => self.trace_frame(),
             Action::CycleStopTimer => self.cycle_stop_timer(),
             Action::CycleStopDistance => self.cycle_stop_distance(),
             Action::ToggleStrokes => {
@@ -427,7 +431,7 @@ impl App {
                     from = committed,
                     "resuming job"
                 );
-                self.estimate = Some((plan.total_distance_mm(), plan.estimated_secs()));
+                self.estimate = Some(plan.estimate(&self.estimate_machine()));
                 self.plan = Some(plan);
                 self.source = resumable.meta.source.clone();
                 self.job = Some(Job {
@@ -469,6 +473,7 @@ impl App {
         // would tear the drawing in two.
         if self.resume_from.is_none() && !self.shapes.is_empty() {
             self.place_at_head();
+            self.warn_if_off_field();
         }
         // Cloned up front: the worker takes ownership of the plan, and the copy
         // the app keeps stays available for the preview and the stroke list.
@@ -508,6 +513,44 @@ impl App {
         }
     }
 
+    /// Trace the drawing's outline with the pen up, so the operator can see
+    /// where it will land before committing paper to it (step 5.3).
+    ///
+    /// The plan is placed at the head first, exactly as `Enter` would, so what
+    /// the frame traces is what a plot started right now would fill.
+    fn trace_frame(&mut self) {
+        if self.resume_from.is_none() && !self.shapes.is_empty() {
+            self.place_at_head();
+        }
+        let Some(outline) = self.plan.as_ref().and_then(Plan::frame_outline) else {
+            self.note = Some("nothing to frame".to_owned());
+            return;
+        };
+        self.warn_if_off_field();
+        self.worker.send(Command::Frame {
+            outline,
+            feed: self.profile.plan.travel_feed,
+        });
+    }
+
+    /// Put a note on screen when the placed drawing leaves the machine's field.
+    ///
+    /// `build_plan` already logs this, but the log scrolls and the carriage
+    /// does not care: the operator about to press `enter` needs it in front of
+    /// them. Clipping itself is still the host's job (§2.4).
+    fn warn_if_off_field(&mut self) {
+        let Some((min, max)) = self.plan.as_ref().and_then(Plan::drawn_bounds) else {
+            return;
+        };
+        let field = &self.profile.field;
+        if !field.contains(min) || !field.contains(max) {
+            self.note = Some(format!(
+                "warning: the drawing runs off the {} field from here",
+                self.profile.name
+            ));
+        }
+    }
+
     /// Rebuild the plan with the drawing anchored at the head's position, and
     /// refresh what the UI derives from it.
     fn place_at_head(&mut self) {
@@ -519,7 +562,7 @@ impl App {
             strokes = plan.stroke_count(),
             "drawing placed at the head"
         );
-        self.estimate = Some((plan.total_distance_mm(), plan.estimated_secs()));
+        self.estimate = Some(plan.estimate(&self.estimate_machine()));
         self.plan = Some(plan);
     }
 
@@ -567,9 +610,14 @@ impl App {
         self.stop_distance.map(|i| STOP_DISTANCE_MM[i])
     }
 
-    /// Cached plan estimate `(total_distance_mm, estimated_secs)`, for the ETA.
-    pub fn estimate(&self) -> Option<(f64, f64)> {
+    /// Cached dry-run of the loaded plan, for the ETA and the idle summary.
+    pub fn estimate(&self) -> Option<Estimate> {
         self.estimate
+    }
+
+    /// The machine numbers the time estimate runs on, from the profile.
+    fn estimate_machine(&self) -> estimate::Machine {
+        estimate::Machine::from_profile(&self.profile)
     }
 
     /// The armed safety-timer duration in minutes, if any (for the status bar).
@@ -828,6 +876,59 @@ mod tests {
         assert!(
             start.x < field.width_mm / 4.0 && start.y < field.height_mm / 4.0,
             "the drawing was centred in the field again: {start:?}"
+        );
+    }
+
+    /// `f` frames what `enter` would draw: the operator checks where the
+    /// drawing lands, then commits — so the two must agree about the placement.
+    #[test]
+    fn the_frame_outlines_exactly_what_enter_would_draw() {
+        let mut app = app_with_a_drawing();
+
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Right));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        app.drain_worker_events();
+        let head = app.machine().position;
+
+        app.on_key(press('f'));
+        let framed = app
+            .plan()
+            .and_then(Plan::frame_outline)
+            .expect("the frame has an outline");
+
+        // The frame starts at the head, and closes on itself.
+        assert!(
+            close(framed[0], head),
+            "framed {:?} not {head:?}",
+            framed[0]
+        );
+        assert_eq!(framed.first(), framed.last());
+
+        // Pressing enter now draws inside that very box.
+        app.on_key(key(KeyCode::Enter));
+        let (min, max) = app
+            .plan()
+            .and_then(Plan::drawn_bounds)
+            .expect("the plot has bounds");
+        assert!(close(min, framed[0]), "{min:?} vs {:?}", framed[0]);
+        assert!(close(max, framed[2]), "{max:?} vs {:?}", framed[2]);
+    }
+
+    /// Nothing loaded means nothing to frame — and it must say so rather than
+    /// send the head somewhere on the strength of an empty box.
+    #[test]
+    fn framing_nothing_says_so_instead_of_moving() {
+        let (mut app, sent) = app_with_resume_prompt();
+        app.on_key(press('n')); // decline the resume; no drawing loaded
+        app.on_key(press('f'));
+
+        assert_eq!(app.note(), Some("nothing to frame"));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !sent.lock().unwrap().iter().any(|l| l.starts_with("G1 X")),
+            "the head moved with nothing to frame"
         );
     }
 

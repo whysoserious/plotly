@@ -37,6 +37,8 @@ pub enum Action {
     StepSmaller,
     /// Start drawing the loaded plan.
     StartPlot,
+    /// Trace the drawing's bounding box with the pen up, to see where it lands.
+    Frame,
     /// Cycle the timed stop-and-pen-up safety cutoff (off / … / off).
     CycleStopTimer,
     /// Cycle the distance stop-and-pen-up cutoff (off / … / off).
@@ -96,6 +98,12 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         probe: Some(KeyCode::Enter),
         action: Action::StartPlot,
         description: "draw the loaded SVG",
+    },
+    Binding {
+        keys: "f",
+        probe: Some(KeyCode::Char('f')),
+        action: Action::Frame,
+        description: "trace the drawing's outline, pen up (where will it land?)",
     },
     Binding {
         keys: "t",
@@ -243,6 +251,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::StepBigger),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::StepSmaller),
         KeyCode::Enter => Some(Action::StartPlot),
+        KeyCode::Char('f') => Some(Action::Frame),
         KeyCode::Char('t') => Some(Action::CycleStopTimer),
         KeyCode::Char('m') => Some(Action::CycleStopDistance),
         KeyCode::Esc => Some(Action::Pause),

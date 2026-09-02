@@ -29,6 +29,10 @@ const HOMING_TIMEOUT: Duration = Duration::from_secs(120);
 /// so a couple of seconds is the real figure; this is slack around it.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default [`PenSettings::settle_secs`]. A guess, and the one pen number with
+/// no firmware setting behind it; the time estimate assumes the same figure.
+const DEFAULT_PEN_SETTLE_SECS: f64 = 0.05;
+
 /// Grbl realtime soft reset (Ctrl-X).
 const SOFT_RESET: u8 = 0x18;
 
@@ -65,6 +69,13 @@ pub struct PenSettings {
     pub z_feed: u32,
     /// Feed rate XY travel should use afterwards, mm/min.
     pub xy_feed: u32,
+    /// How long to hold still after the pen's Z move, seconds.
+    ///
+    /// The Z move is *finished* by then — the dwell that carries this waits
+    /// for the planner (see [`Driver::set_pen`]) — so this is only the pen
+    /// itself: a spring-loaded holder bounces on landing and swings after a
+    /// lift. Zero is legal and still leaves the wait for the Z move.
+    pub settle_secs: f64,
 }
 
 impl Default for PenSettings {
@@ -74,6 +85,7 @@ impl Default for PenSettings {
             down_z: 5.0,
             z_feed: 5000,
             xy_feed: 2000,
+            settle_secs: DEFAULT_PEN_SETTLE_SECS,
         }
     }
 }
@@ -393,8 +405,10 @@ impl Driver {
     /// step 2.7; right now there is no job to interrupt, only motion in flight.
     pub fn emergency_stop(&mut self) -> Result<(), DriverError> {
         tracing::warn!("emergency stop");
-        if let Err(err) = self.pen_up() {
-            tracing::warn!(%err, "pen up before the reset failed; resetting anyway");
+        if self.pen == Pen::Down {
+            if let Err(err) = self.move_pen_now(Pen::Up) {
+                tracing::warn!(%err, "pen up before the reset failed; resetting anyway");
+            }
         }
         self.connection.transport.write_realtime(SOFT_RESET)?;
         self.settle_after_reset();
@@ -416,21 +430,54 @@ impl Driver {
         self.pen = Pen::Up;
     }
 
-    /// Move the pen to `target`, then restore the XY feed rate.
+    /// Move the pen to `target`, fenced off from the XY motion around it, then
+    /// restore the XY feed rate.
     ///
-    /// The second line matters: `F` is modal in Grbl, so without it every
+    /// The fences are the point. `ok` means "queued" (§15.1), so on their own
+    /// the four lines below just join the planner's queue, and Grbl's
+    /// look-ahead then carries speed *through* the corner between the last
+    /// drawn segment and the Z move — junction deviation `$11` = 0.010 mm at
+    /// `$120` = 3000 mm/s² is about 8 mm/s, taken instantly sideways. The
+    /// machine cannot turn that sharply: belts and pen holder flex, and the
+    /// tip draws a small hook towards wherever it goes next while it is still
+    /// on the paper. The same happens in reverse at pen-down, as a tick at the
+    /// start of the stroke.
+    ///
+    /// So the order the operator expects — finish the line, *then* lift, *then*
+    /// travel — has to be asked for. `G4` is how: Grbl runs a dwell only once
+    /// the planner buffer has emptied, which makes the one before the Z move a
+    /// "the line is really drawn" barrier and the one after it "the pen is
+    /// really up", with [`PenSettings::settle_secs`] of stillness on top for
+    /// the pen to stop swinging. The cost is a real stop and two round trips
+    /// per pen move; that is what a clean line end costs.
+    ///
+    /// The final line matters too: `F` is modal in Grbl, so without it every
     /// following XY move would inherit the fast Z feed (§2.2).
     fn set_pen(&mut self, target: Pen) -> Result<(), DriverError> {
         if self.pen == target {
             tracing::debug!(pen = %target, "pen already there");
             return Ok(());
         }
+        self.drain()?;
+        self.move_pen_now(target)?;
+        self.dwell(self.settings.settle_secs.max(0.0))?;
+        self.command(&format!("G1 F{}", self.settings.xy_feed))?;
+        Ok(())
+    }
+
+    /// The pen's Z move on its own: queued behind whatever is already in the
+    /// planner, with nothing waited for.
+    ///
+    /// Only the panic path wants this. Everywhere else goes through
+    /// [`Driver::set_pen`], which fences the move so it does not blend into the
+    /// motion around it — but an emergency stop cannot afford to wait out a
+    /// buffer that may hold seconds of travel.
+    fn move_pen_now(&mut self, target: Pen) -> Result<(), DriverError> {
         let z = match target {
             Pen::Up => self.settings.up_z,
             Pen::Down => self.settings.down_z,
         };
         self.command(&format!("G1 G90 Z{z:.3} F{}", self.settings.z_feed))?;
-        self.command(&format!("G1 F{}", self.settings.xy_feed))?;
         self.pen = target;
         // Debug, not info: a drawing raises and lowers the pen once per shape,
         // which on a hatched plot is thousands of lines that would bury
@@ -619,6 +666,28 @@ mod tests {
             sent.iter().any(|l| l.ends_with("F1234")),
             "the profile's jog feed was not used: {sent:?}"
         );
+    }
+
+    /// A panic stop must not wait out a buffer that may hold seconds of travel;
+    /// it lifts and resets. (Without the pen-up it would also be *queued*, but
+    /// the reset that follows is what makes waiting pointless.)
+    #[test]
+    fn the_panic_stop_lifts_without_waiting_for_the_buffer() {
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let mut d = driver_on(transport);
+        d.pen_down().unwrap();
+        sent.lock().unwrap().clear();
+
+        d.emergency_stop().unwrap();
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(
+            *sent,
+            vec!["G1 G90 Z0.500 F5000".to_owned()],
+            "the panic path may only lift, then reset"
+        );
+        assert_eq!(d.pen(), Pen::Up);
     }
 
     #[test]

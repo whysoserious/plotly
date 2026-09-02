@@ -4,6 +4,7 @@
 //! placed polylines into a flat [`Plan`] of [`Op`]s (step 2.3). The worker
 //! (step 2.4) walks the plan and emits G-code.
 
+pub mod estimate;
 pub mod svg;
 pub mod text;
 
@@ -252,6 +253,57 @@ impl Plan {
         drawn
     }
 
+    /// Bounding box of the *drawn* geometry, in machine-logical mm, or `None`
+    /// when nothing is drawn.
+    ///
+    /// Only pen-down segments count. A plan opens with a travel from wherever
+    /// the head was to the drawing, and counting that would put the box round
+    /// the journey rather than round the picture — wrong both for the preview
+    /// and for the frame the operator traces before committing paper to it.
+    pub fn drawn_bounds(&self) -> Option<(Point, Point)> {
+        let mut pen_down = false;
+        let mut pos = Point::new(0.0, 0.0);
+        let mut acc: Option<(Point, Point)> = None;
+        let include = |p: Point, acc: &mut Option<(Point, Point)>| {
+            *acc = Some(match *acc {
+                None => (p, p),
+                Some((min, max)) => (
+                    Point::new(min.x.min(p.x), min.y.min(p.y)),
+                    Point::new(max.x.max(p.x), max.y.max(p.y)),
+                ),
+            });
+        };
+        for op in &self.ops {
+            match op {
+                Op::PenDown => pen_down = true,
+                Op::PenUp => pen_down = false,
+                Op::MoveTo(p) => {
+                    if pen_down {
+                        // Both ends: the segment starts where the pen landed.
+                        include(pos, &mut acc);
+                        include(*p, &mut acc);
+                    }
+                    pos = *p;
+                }
+                Op::SetFeed(_) | Op::Dwell(_) => {}
+            }
+        }
+        acc
+    }
+
+    /// The drawn bounding box as a closed rectangle to trace, starting and
+    /// ending at its top-left corner — what the `f` frame follows (step 5.3).
+    pub fn frame_outline(&self) -> Option<Vec<Point>> {
+        let (min, max) = self.drawn_bounds()?;
+        Some(vec![
+            Point::new(min.x, min.y),
+            Point::new(max.x, min.y),
+            Point::new(max.x, max.y),
+            Point::new(min.x, max.y),
+            Point::new(min.x, min.y),
+        ])
+    }
+
     /// Number of [`Op::MoveTo`] ops.
     pub fn move_count(&self) -> usize {
         self.ops
@@ -274,34 +326,11 @@ impl Plan {
         total
     }
 
-    /// Rough print-time estimate in seconds, from each segment's feed plus a
-    /// small fixed cost per pen move. A planning aid, not a promise — it ignores
-    /// acceleration, so real prints run a little longer (a precise dry-run model
-    /// is step 5.3).
-    pub fn estimated_secs(&self) -> f64 {
-        let mut pos = Point::new(0.0, 0.0);
-        let mut feed_mm_min = 0.0_f64;
-        let mut secs = 0.0;
-        for op in &self.ops {
-            match op {
-                Op::SetFeed(f) => feed_mm_min = f64::from(*f),
-                Op::MoveTo(p) => {
-                    let dist = (p.x - pos.x).hypot(p.y - pos.y);
-                    if feed_mm_min > 0.0 {
-                        secs += dist / (feed_mm_min / 60.0);
-                    }
-                    pos = *p;
-                }
-                Op::PenUp | Op::PenDown => secs += PEN_MOVE_SECS,
-                Op::Dwell(s) => secs += *s,
-            }
-        }
-        secs
+    /// Dry-run time and distances on `machine` — see [`estimate`].
+    pub fn estimate(&self, machine: &estimate::Machine) -> estimate::Estimate {
+        estimate::estimate(self, machine)
     }
 }
-
-/// Fixed time charged per pen up/down, seconds (the Z move plus settle).
-const PEN_MOVE_SECS: f64 = 0.2;
 
 /// Emit the ops for a sequence of `(label, polyline)` items and index the
 /// strokes they produce. The one place a plan is assembled — both
@@ -511,9 +540,10 @@ mod tests {
         let plan = Plan::build(&[], &Placement::identity(), &PlanSettings::default());
         assert_eq!(plan.stroke_count(), 0);
         assert_eq!(plan.move_count(), 0);
-        // No travel; the only time is the initial pen-up (< 1 s).
+        // Nothing to move and nothing to draw.
         assert_eq!(plan.total_distance_mm(), 0.0);
-        assert!(plan.estimated_secs() < 1.0);
+        assert_eq!(plan.drawn_bounds(), None);
+        assert_eq!(plan.frame_outline(), None);
     }
 
     /// Two 10 mm strokes, far apart so the travel between them is obvious.
@@ -619,16 +649,56 @@ mod tests {
     }
 
     #[test]
-    fn distance_and_time_estimate_a_known_line() {
+    fn distance_measures_a_known_line() {
         // A single 100 mm stroke from the origin: travel 0 (starts at origin),
-        // then 100 mm drawn. Total distance is 100 mm.
+        // then 100 mm drawn. Total distance is 100 mm. Timing it is
+        // `plan::estimate`, which has its own tests.
         let line = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
         let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
         assert!((plan.total_distance_mm() - 100.0).abs() < 1e-6);
+    }
 
-        // 100 mm drawn at 2000 mm/min = 3 s, plus a pen down/up (~0.4 s). The
-        // travel to the start is zero-length here.
-        let secs = plan.estimated_secs();
-        assert!(secs > 3.0 && secs < 4.0, "estimate {secs}s out of range");
+    /// The box goes round the *drawing*, not round the journey to it: a plan
+    /// opens with a travel from the head, and counting that would frame the
+    /// wrong thing entirely.
+    #[test]
+    fn drawn_bounds_ignore_the_travel_to_the_drawing() {
+        let square = vec![
+            Point::new(100.0, 200.0),
+            Point::new(140.0, 200.0),
+            Point::new(140.0, 230.0),
+            Point::new(100.0, 200.0),
+        ];
+        let plan = Plan::build(&[square], &Placement::identity(), &PlanSettings::default());
+
+        let (min, max) = plan.drawn_bounds().expect("something is drawn");
+        assert_eq!(min, Point::new(100.0, 200.0));
+        assert_eq!(max, Point::new(140.0, 230.0));
+        // The head travelled from the origin to get there, and that is not
+        // part of the drawing.
+        assert!(plan.total_distance_mm() > plan.total_stroke_length_mm());
+    }
+
+    #[test]
+    fn the_frame_outline_is_a_closed_rectangle_of_the_drawn_bounds() {
+        let line = vec![Point::new(10.0, 20.0), Point::new(50.0, 60.0)];
+        let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
+
+        let outline = plan.frame_outline().expect("something is drawn");
+        assert_eq!(
+            outline,
+            vec![
+                Point::new(10.0, 20.0),
+                Point::new(50.0, 20.0),
+                Point::new(50.0, 60.0),
+                Point::new(10.0, 60.0),
+                Point::new(10.0, 20.0),
+            ]
+        );
+        assert_eq!(
+            outline.first(),
+            outline.last(),
+            "the frame has to come back to where it started"
+        );
     }
 }

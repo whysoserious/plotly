@@ -31,7 +31,7 @@ pub fn canvas(frame: &mut Frame, area: Rect, app: &App) {
     let Some(plan) = app.plan().filter(|_| cols > 0 && rows > 0) else {
         return;
     };
-    let Some(bounds) = plan_bounds(plan) else {
+    let Some(bounds) = plan.drawn_bounds() else {
         return;
     };
 
@@ -43,47 +43,6 @@ pub fn canvas(frame: &mut Frame, area: Rect, app: &App) {
 
     let lines = grid.into_lines(cursor);
     frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Bounding box of the *drawn* geometry, in machine-logical mm.
-///
-/// Only pen-down segments count: a plan starts with a long pen-up travel from
-/// home to the drawing, and including it would shrink the whole figure to a
-/// speck in the corner.
-fn plan_bounds(plan: &Plan) -> Option<(Point, Point)> {
-    let mut acc: Option<(Point, Point)> = None;
-    for_each_drawn_point(plan, |p| {
-        acc = Some(match acc {
-            None => (p, p),
-            Some((min, max)) => (
-                Point::new(min.x.min(p.x), min.y.min(p.y)),
-                Point::new(max.x.max(p.x), max.y.max(p.y)),
-            ),
-        });
-    });
-    acc
-}
-
-/// Call `f` with both endpoints of every pen-down segment.
-fn for_each_drawn_point(plan: &Plan, mut f: impl FnMut(Point)) {
-    let mut pen_down = false;
-    let mut prev: Option<Point> = None;
-    for op in &plan.ops {
-        match op {
-            Op::PenDown => pen_down = true,
-            Op::PenUp => pen_down = false,
-            Op::MoveTo(p) => {
-                if pen_down {
-                    if let Some(from) = prev {
-                        f(from);
-                    }
-                    f(*p);
-                }
-                prev = Some(*p);
-            }
-            Op::SetFeed(_) | Op::Dwell(_) => {}
-        }
-    }
 }
 
 /// Rasterise the pen-down strokes onto the grid, one line per drawn segment.
@@ -307,7 +266,7 @@ mod tests {
             Op::MoveTo(Point::new(10.0, 5.0)),
             Op::PenUp,
         ]);
-        let b = plan_bounds(&plan).unwrap();
+        let b = plan.drawn_bounds().unwrap();
         let mut grid = Grid::new(10, 4);
         rasterise_strokes(&mut grid, &plan, b);
         // Every cell column in the target row should have at least one dot.

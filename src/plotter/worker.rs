@@ -40,6 +40,13 @@ pub enum Command {
         progress: Option<ProgressWriter>,
         start_index: usize,
     },
+    /// Trace an outline with the pen up, at `feed` mm/min — the `f` frame,
+    /// which shows the operator where the drawing will land before any ink is
+    /// committed to the paper (step 5.3).
+    Frame {
+        outline: Vec<Point>,
+        feed: u32,
+    },
     /// Panic abort: pen up, then soft reset (also aborts a running plan).
     EmergencyStop,
     /// Stop drawing the current plan (pen up), keep the connection.
@@ -95,8 +102,13 @@ pub enum Event {
     Pausing,
     /// The plan is paused at `done`/`total`, pen up at a shape boundary.
     Paused { done: usize, total: usize },
-    /// The plan finished on its own.
-    PlanDone,
+    /// The plan finished on its own, after `elapsed_secs` of drawing.
+    ///
+    /// The clock starts when the plan does — after any resume preamble — so on
+    /// a resumed job this is the time of *this* run, not of the whole drawing.
+    /// Wall time across a pause is not the plot's time; it is however long the
+    /// operator was away.
+    PlanDone { elapsed_secs: f64 },
     /// The plan was stopped or aborted before the end.
     Aborted,
     /// A command failed. Also logged; surfaced so the UI can flag it.
@@ -180,6 +192,14 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
                     break;
                 }
             }
+            // Like a plan, the frame is a long motion that must stay
+            // interruptible, so it gets the same between-moves treatment.
+            Command::Frame { outline, feed } => {
+                let flow = run_frame(&mut driver, &outline, feed, commands, events);
+                if flow.is_break() {
+                    break;
+                }
+            }
             other => {
                 run_one(&mut driver, other, events);
                 emit(events, Event::State(snapshot(&driver)));
@@ -224,12 +244,13 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
             }
         }
         // Pause/Resume/StopAfter only mean something during a plan; ignore here.
-        // RunPlan/Shutdown are handled by the loop, never reach here.
+        // RunPlan/Frame/Shutdown are handled by the loop, never reach here.
         Command::Pause
         | Command::Resume
         | Command::StopAfter { .. }
         | Command::StopAfterDistance { .. }
         | Command::RunPlan { .. }
+        | Command::Frame { .. }
         | Command::Shutdown => ("", Ok(())),
     };
     if let Err(err) = result {
@@ -380,14 +401,61 @@ fn run_plan(
         checkpoint(progress, sent, total, driver);
     }
 
-    tracing::info!(ops = total, "plan done");
+    let elapsed_secs = started.elapsed().as_secs_f64();
+    tracing::info!(ops = total, secs = elapsed_secs, "plan done");
     if let Some(writer) = progress {
         let pos = driver.position();
         if let Err(err) = writer.finish(total, [pos.x, pos.y]) {
             tracing::warn!(%err, "final progress write failed");
         }
     }
-    emit(events, Event::PlanDone);
+    emit(events, Event::PlanDone { elapsed_secs });
+    emit(events, Event::State(snapshot(driver)));
+    ControlFlow::Continue(())
+}
+
+/// Trace `outline` with the pen up: the frame that shows where a drawing will
+/// land (step 5.3). Nothing is drawn and nothing is checkpointed — this is a
+/// look, not a job.
+///
+/// On an A0 the frame is metres of travel, so it stays interruptible between
+/// moves exactly as a plan does.
+fn run_frame(
+    driver: &mut Driver,
+    outline: &[Point],
+    feed: u32,
+    commands: &Receiver<Command>,
+    events: &Sender<Event>,
+) -> ControlFlow<()> {
+    emit(events, Event::Busy("framing".to_owned()));
+    tracing::info!(corners = outline.len(), feed, "tracing the frame");
+
+    let prepare = driver.pen_up().and_then(|()| driver.set_feed(feed));
+    if let Err(err) = prepare {
+        tracing::error!(%err, "could not lift the pen for the frame");
+        emit(events, Event::Error(err.to_string()));
+        emit(events, Event::State(snapshot(driver)));
+        return ControlFlow::Continue(());
+    }
+
+    for (index, corner) in outline.iter().enumerate() {
+        match commands.try_recv() {
+            Ok(command) => match handle_interrupt(driver, command, index, outline.len(), events) {
+                Interrupt::Continue => {}
+                Interrupt::Stopped => return ControlFlow::Continue(()),
+                Interrupt::Shutdown => return ControlFlow::Break(()),
+            },
+            Err(TryRecvError::Disconnected) => return ControlFlow::Break(()),
+            Err(TryRecvError::Empty) => {}
+        }
+        if let Err(err) = driver.move_to(*corner) {
+            tracing::error!(%err, corner = index, "frame move failed");
+            emit(events, Event::Error(err.to_string()));
+            break;
+        }
+    }
+
+    tracing::info!("frame done");
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(())
 }
