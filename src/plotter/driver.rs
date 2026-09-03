@@ -523,15 +523,20 @@ impl Driver {
     /// move, §2.5), which makes the one *before* the Z move a "the line is
     /// really drawn" barrier.
     ///
-    /// There is deliberately no barrier *after* the Z move unless a settle
-    /// asks for one. Ordering does not need it — Grbl runs the queued blocks
-    /// in order, so the next XY move starts when the Z move ends either way —
-    /// and waiting for it costs a round trip with the pen already at its new
-    /// height. On this machine that was measured at *298 ms standing still on
-    /// the paper* before every stroke (§2.7): a quarter of a second for the
-    /// ink to pool into a dot, and half an hour across a big plot. A settle is
-    /// the one thing only a barrier can give, so it is the one thing that
-    /// brings the barrier back.
+    /// The barrier *after* the Z move is not about ordering — Grbl runs queued
+    /// blocks in order, and sampling the axes at 6 ms found no overlap at all
+    /// (§2.10). It is about the *velocity the pen lands with*. Without it, the
+    /// planner joins the Z block to the XY block that follows and the head
+    /// leaves that junction already moving: the tip touches down with sideways
+    /// speed and drags a hook into the start of the stroke. With it, the
+    /// machine reaches a standstill first and the pen lands still.
+    ///
+    /// This is empirical and it cost a detour to learn: dropping this barrier
+    /// to save the 298 ms of stillness it caused (§2.7) brought the hooks
+    /// straight back, and only at the landing, which is exactly where the
+    /// junction is. So it goes out unconditionally — `G4 P0.000` when there is
+    /// no settle to add. What a settle buys on top is stillness, which is a
+    /// different thing and costs ink when the tip is down (§2.8).
     ///
     /// The final line matters too: `F` is modal in Grbl, so without it every
     /// following XY move would inherit the fast Z feed (§2.2).
@@ -552,17 +557,15 @@ impl Driver {
             PenFence::Dwell => {
                 self.drain()?;
                 self.move_pen_now(target)?;
-                if settle > 0.0 {
-                    // One dwell does both jobs: it waits out the Z move, then
-                    // holds still for the settle.
-                    self.dwell(settle)?;
-                }
+                // Always, even for a zero settle: this one is not about
+                // stillness, it is about *landing at a standstill*. See below.
+                self.dwell(settle)?;
             }
             PenFence::Poll => {
                 self.wait_idle()?;
                 self.move_pen_now(target)?;
+                self.wait_idle()?;
                 if settle > 0.0 {
-                    self.wait_idle()?;
                     // The machine is stopped and we know it, so the settle is
                     // the host's to wait out — asking the board for a dwell
                     // would put the same trust back in `G4` that this variant

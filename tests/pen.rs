@@ -38,9 +38,10 @@ fn pen_down_is_fenced_off_from_the_motion_around_it() {
         vec![
             "G4 P0.01".to_owned(),
             "G1 G90 Z5.000 F5000".to_owned(),
-            // No dwell after the landing: the settle is zero, and waiting for
-            // the board to confirm a move whose ordering Grbl already
-            // guarantees cost 298 ms with the tip on the paper (§2.7).
+            // `P0.000` — no stillness asked for, but the barrier still goes
+            // out: it is what makes the pen land at a standstill instead of
+            // leaving the Z-to-XY junction already moving sideways (§2.10).
+            "G4 P0.000".to_owned(),
             "G1 F2000".to_owned(),
         ]
     );
