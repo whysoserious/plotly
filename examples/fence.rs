@@ -200,15 +200,18 @@ fn stage_pen(probe: &mut Probe, opts: &Options) {
 
 /// Turn the `MPos` samples into the two numbers that matter.
 fn report_pen_samples(samples: &[(f64, [f64; 3])], opts: &Options) {
-    println!(
-        "  {} samples over {:.0} ms",
-        samples.len(),
-        samples.last().map_or(0.0, |s| s.0)
-    );
+    let span = samples.last().map_or(0.0, |s| s.0);
+    println!("  {} samples over {span:.0} ms", samples.len());
     if samples.len() < 5 {
         println!("  !! too few samples to read anything into");
         return;
     }
+    // What a straddling sample can fake, so the reader can tell a real overlap
+    // from the instrument's own blur: three Z transitions, each able to hide
+    // one sample's worth of XY travel inside it.
+    let gap_ms = span / samples.len() as f64;
+    let blur_mm = 3.0 * gap_ms / 1000.0 * f64::from(opts.feed) / 60.0;
+    println!("  sample every {gap_ms:.0} ms — an overlap under {blur_mm:.2} mm is just that");
     // The pen is on the paper once Z is within a hair of its down position.
     let down = f64::from(opts.pen_down_z);
     let touching = |p: &[f64; 3]| (p[2] - down).abs() < 0.05;
@@ -237,8 +240,10 @@ fn report_pen_samples(samples: &[(f64, [f64; 3])], opts: &Options) {
     }
     println!(
         "\n  => {}",
-        if moved_while_landing > 0.05 {
+        if moved_while_landing > blur_mm * 2.0 {
             "the axes OVERLAP: the pen is moving sideways while it changes height"
+        } else if moved_while_landing > blur_mm {
+            "inconclusive — the overlap is the size of the sampling blur"
         } else {
             "the axes do NOT overlap; whatever marks the paper is not this"
         }
@@ -337,12 +342,27 @@ impl Probe {
     }
 
     /// One `?` status report, or `None` if the board said nothing.
+    ///
+    /// Returns on the *first* report rather than draining a fixed window. The
+    /// difference is the whole instrument: waiting out an 80 ms window put the
+    /// samples 108 ms apart, and at 10 mm/s that is 1.08 mm of travel per
+    /// sample — enough that one sample straddling a Z-to-XY transition looks
+    /// exactly like the axes overlapping. An instrument whose error is the
+    /// size of the effect cannot see the effect.
     fn status(&mut self) -> Option<String> {
         self.transport.write_realtime(b'?').ok()?;
-        self.transport
-            .read_lines_for(Duration::from_millis(80))
-            .into_iter()
-            .find(|l| l.starts_with('<'))
+        let deadline = Instant::now() + Duration::from_millis(80);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            match self.transport.read_line_for(left) {
+                Ok(Some(line)) if line.starts_with('<') => return Some(line),
+                Ok(Some(_)) => {}
+                _ => return None,
+            }
+        }
     }
 
     /// Poll `?` until the machine has reported `Idle` [`IDLE_STREAK`] times

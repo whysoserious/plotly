@@ -355,6 +355,7 @@ i nie zostało zmierzone, okazało się nietrafione.
 | pióro stało 298 ms na papierze | n=14, mediana 298, min 297, max 304 — *usunięte* | 2.7 |
 | host wysyła poprawną kolejność | zrzut z mocka: kreska → ~G4~ → Z → feed → przejazd | 2.5 |
 | maszyna miała ~$120=$121=3000~, ~$11=0.010~ | przez cały czas, mimo przekonania, że zmieniono | 2.5 |
+| *ruch maszyny jest czysty* | 2597 próbek co 6 ms: XY w czasie ruchu Z = *0,030 mm* (rozmycie 0,10), postój na papierze *8 ms*, ~first touch~ dokładnie na ~X-40.000~ | 2.10 |
 
 *Co zostało OBALONE (i czym):*
 - /„to kolejność podniesienia pióra"/ — bariery ~G4~ założone i zmierzone; haczyki bez zmian.
@@ -364,20 +365,42 @@ i nie zostało zmierzone, okazało się nietrafione.
   faktycznym zejściu na 500: artefakty zostały. Hipoteza *obalona*, nie „niesprawdzona".
 - /„to prędkość na złączu Z↔XY"/ — ~$11 = 0.002~ (1,55 mm/s) + ~pen_fence = "off"~: bez zmian.
 
-*Czego NIE wiemy:* czy ruch XY nakłada się na ruch Z, i jak długo końcówka naprawdę dotyka
-papieru stojąc. Log druciany tego nie mówi — pokazuje, co wysyłamy, nie co robią osie.
+** 2.10 Ruch maszyny jest czysty — ślady robi pióro (2026-09-03)
+~cargo run --example fence -- --pen --feed 300~, 2597 próbek co 6 ms (rozmycie 0,10 mm):
+| XY przejechane, gdy Z też się ruszał | *0,030 mm* — poniżej rozmycia |
+| postój z końcówką na papierze, XY nieruchome | *8 ms* |
+| pierwszy kontakt | ~X-40.000 Y0.000 Z5.000~ — przejazd skończony *co do mikrona* |
 
-*NASTĘPNY KROK:* ~cargo run --example fence -- --pen~. Wykonuje sekwencję drivera z bufora
-(warunki jak przy ~pen_fence = "off"~) i próbkuje ~?~, licząc dwie liczby: /XY przejechane
-w czasie, gdy Z też się ruszał/ (= haczyk) i /czas z końcówką na papierze przy nieruchomym XY/
-(= kropka). Jeśli obie wyjdą ~zero — *papieru nie znaczy ruch maszyny, tylko samo pióro*
-(wolne lądowanie i odjazd, patrz niewyjaśnione 240 ms osi Z), i wtedy dźwignią jest
-~pen_z_feed~ / ~pen_down_z~, a nie żadne ustawienie ruchu.
+*Grbl serializuje bloki dokładnie tak, jak powinien.* Przejazd dobiega końca, dopiero potem
+pióro siada; w trakcie opadania nie jedzie na boki; po wylądowaniu nie stoi. *Ruch nie ma
+z artefaktami nic wspólnego* — a to obala całą rodzinę hipotez z 2.5–2.8 naraz.
 
-*Stan maszyny i konfiguracji na teraz:* ~$120=$121=500~, ~$11=0.002~ *zapisane w EEPROM-ie*
-przez plotly z ~~/.config/plotly/config.toml~ (~accel_mm_s2~, ~junction_deviation_mm~,
-~pen_fence = "off"~). Powrót do fabrycznych: ~accel_mm_s2 = 3000.0~, ~junction_deviation_mm =
-0.010~ w tym pliku. *Zawsze weryfikuj w logu* — ~grep "machine profile" plotly.log | tail -1~.
+/Uwaga metodologiczna:/ pierwszy przebieg tego samego pomiaru dał „2,610 mm, osie się
+nakładają". Był to *artefakt przyrządu* — ~status()~ czekał pełne 80 ms okna, więc próbki szły
+co 108 ms, a przy 10 mm/s jedna próbka to 1,08 mm; trzy przejścia Z↔XY × jedna zgubiona próbka
+≈ dokładnie te 2,6 mm. Przyrząd, którego błąd jest wielkości efektu, nie mierzy efektu.
+~--pen~ wypisuje teraz własne rozmycie i ma trzeci werdykt: /inconclusive/.
+
+*Zostaje pióro.* Sekwencja jest po stronie maszyny bez zarzutu, więc ślad powstaje z tego, co
+robi tusz przy zaczynaniu i kończeniu kontaktu:
+- *docisk* — ~pen_down_z = 5.0~ dociska sprężynę; im mocniej, tym więcej tuszu na starcie.
+  Schodzić po 0,2 mm, aż kreska zacznie się rwać, i cofnąć o krok;
+- *wolne dosiadanie i odrywanie* — oś Z pokonuje 4,5 mm w ~240 ms (18 mm/s), *4× wolniej, niż
+  każe jej ~F5000~, i wciąż nie wiadomo dlaczego* (~$112 = 15000~ tego nie tłumaczy). Końcówka
+  jest przez kilkadziesiąt ms w lekkim kontakcie, nieruchoma — to jest okno na kałużę;
+- *samo pióro* — najtańszy test rozstrzygający: narysować ~hook-test.svg~ *innym pisakiem*.
+  Jeśli ślad zmienia charakter, temat jest zamknięty po stronie tuszu.
+
+*Konsekwencja dla ustawień:* ~$120/$121 = 500~ i ~$11 = 0.002~ były strojone pod obaloną
+hipotezę i kosztują ~25 minut na dwugodzinnym rysunku (2.6). *Wracamy na 3000 / 0.010* —
+tym bardziej że przy accel 500 pierwszy milimetr każdej kreski jest rysowany w trakcie
+rozpędzania (66 ms na 1,1 mm), czyli wolno, czyli grubo. Wyższa akceleracja robi *ostrzejszy
+start kreski*, nie gorszy.
+
+*Stan konfiguracji:* ~~/.config/plotly/config.toml~ wraca na ~accel_mm_s2 = 3000.0~ i
+~junction_deviation_mm = 0.010~ (plotly wpisze je do EEPROM-u przy starcie). ~pen_fence~
+zostaje ~"off"~ — pomiar 2.10 mówi, że bariera nie ma czego pilnować, a każda kosztuje postój
+z końcówką na papierze. *Zawsze weryfikuj w logu* — ~grep "machine profile" plotly.log | tail -1~.
 
 * 3. Funkcje
 ** 3.1 MVP
