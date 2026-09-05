@@ -198,7 +198,11 @@ wzdłuż osi *chowa się w niej* i wygląda jak kreska zaczęta wcześniej — d
 | ~--feed 300 --travel-feed 8000~ | *czysto* — prędkość dojazdu nie ma nic do rzeczy |
 | ~--feed 600~ / ~--feed 1000~ | czysto |
 | ~--feed 1400~ / ~--feed 2000~ | haczyk |
-*Granica: ~F1000 czyste, F1400 nie.*
+*Granica: ~F1000 czyste, F1400 nie~*, a domknięta drabinką rampy: przy ~--ramp-feed 1200~
+haczyki wracają na *każdym* rogu. Czyli próg leży *między 1000 a 1200* i ~ramp_feed = 1000~ ma
+mały zapas, nie duży. */Jeśli haczyki kiedyś wrócą/* — inne pióro, inny papier, zużyta
+stalówka — *pierwszym pokrętłem jest ~ramp_feed~ w dół* (800, 600), a nie ~ramp_mm~ w górę:
+zmierzone jest, że to prędkość, a nie długość, decyduje o tym, czy ślad w ogóle powstaje.
 
 *Lekarstwo: rampa, nie globalne zwolnienie.* Ślad powstaje wyłącznie tam, gdzie pióro staje
 albo skręca, więc spowalniamy *tylko te miejsca* — pierwsze i ostatnie ~ramp_mm~ kreski *oraz
