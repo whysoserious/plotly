@@ -60,7 +60,7 @@ impl std::error::Error for ConnectError {}
 /// Open the chosen port and greet the board (DESIGN.org §2.1).
 pub fn connect(choice: &PortChoice, baud: u32) -> Result<Connection, ConnectError> {
     let (mut transport, port): (Box<dyn Transport + Send>, String) = match choice {
-        PortChoice::Mock => (Box::new(MockTransport::new()), "mock".to_owned()),
+        PortChoice::Mock => (Box::new(MockTransport::new()), mock::MOCK_PORT.to_owned()),
         PortChoice::Serial(path) => (
             Box::new(SerialTransport::open(path, baud, READ_TIMEOUT).map_err(ConnectError::Open)?),
             path.clone(),

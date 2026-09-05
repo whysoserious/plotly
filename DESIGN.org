@@ -186,8 +186,13 @@ mniejsza, więc centrowanie było złym domyślnym.
 *Objaw:* koniec (i początek) każdej kreski lekko zagięty. *Przyczyna: ~pen_down_z~.* Pod zbyt
 mocnym dociskiem z isografa wypływa nadmiar tuszu w punkcie kontaktu, a pierwszy ruch go
 rozmazuje. *Rozstrzygnięte drabinką dociskową* (~fence --zladder~, sześć kresek na jednej
-kartce, od ~Z5.0~ w dół co 0,2 mm): rzędy *różnią się między sobą*, ~Z4.2~ jest *bez haczyka*,
-~Z4.0~ już nie dotyka papieru. *Ustawienie: ~pen_down_z = 4.2~.*
+kartce, co 0,2 mm): rzędy *różnią się między sobą*, a najlżejszy, który jeszcze rysuje, jest
+bez haczyka.
+
+*Wartość zależy od tego, jak pióro siedzi w uchwycie* — nie jest stałą maszyny. Po przesunięciu
+isografa w uchwycie (żeby kontakt wypadał w środku skoku Z, a nie na krawędzi pasma) wyszło
+*~pen_down_z = 5.25~*, a nie 4,2 z pierwszej drabinki. *Po każdej wymianie albo przesunięciu
+pióra trzeba to powtórzyć* — najszybciej klawiszami ~.~ / ~,~ w trakcie rysowania kreski.
 
 /Uwaga na margines:/ pasmo między „rysuje" a „nie dotyka" to ~0,2 mm~. Na A0 nierówność papieru
 bywa większa, więc jeśli fragmenty dużego arkusza wyjdą puste — podnieść o 0,1 mm.
@@ -996,8 +1001,10 @@ od razu*. Zamiast tego:
   /Test:/ per-funkcja na ~--simulate~ + ✱ wybrane na sprzęcie.
   /Zmiany zakresu:/ *hatch-fill wypadł* razem z 5.2 (robi to vpype). *Set origin* jest już
   zrobiony inaczej i bez klawisza — originem jest pozycja głowicy przy ~Enter~ (2.4 pkt C).
-  ~pen_down_z~ da się już ustawić w ~config.toml~ (10), więc z kalibracji Z zostaje sam
-  kreator/~JogZ~.
+  ~pen_down_z~ da się już ustawić w ~config.toml~ (10). *~JogZ~ zrobione (2026-09-05):* klawisze
+  ~.~ / ~,~ zmieniają ~pen_down_z~ o 0,05 mm *na żywo*, a przy piórze na dole maszyna od razu
+  siada na nowej wysokości — jedyny sposób ocenić tę liczbę to patrzeć na rysowaną kreskę.
+  Zostaje z kroku: kopie/warstwy, ~page_delay~, go-to XY, mm/inch, kolejka zadań.
 
 * 15. Wyniki spike'u 0.7 (2026-07-22) i to, co zostało otwarte
 Spike wykonany na fizycznej maszynie (~examples/spike.rs~, port ~/dev/ttyACM0~, VID:PID

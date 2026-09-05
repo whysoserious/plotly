@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use super::transport::Transport;
 
+/// What [`crate::plotter::connect`] calls the port when there is no plotter.
+/// The UI keys off it to say so out loud.
+pub const MOCK_PORT: &str = "mock";
+
 /// Firmware version the mock reports on `v`/`V`.
 pub const MOCK_VERSION: &str = "DrawCore V2.10";
 

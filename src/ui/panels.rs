@@ -49,10 +49,17 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     };
     let cutoffs = cutoffs_line(app);
     let note = app.note().map(|n| format!(" — {n}")).unwrap_or_default();
+    // The mock answers every command instantly and correctly, which is exactly
+    // what makes it easy to sit in front of a silent plotter wondering why the
+    // keys stopped working. Say so where the eye already is.
+    let simulating = machine.port == crate::plotter::mock::MOCK_PORT;
+    let head = if simulating {
+        "SIMULATION — nothing moves".to_owned()
+    } else {
+        format!("Connected {} on {}", machine.version, machine.port)
+    };
     let text = format!(
-        "Connected {} on {} [{}] — {activity}{cutoffs}{note} (enter: draw, ? keys)",
-        machine.version,
-        machine.port,
+        "{head} [{}] — {activity}{cutoffs}{note} (enter: draw, ? keys)",
         app.profile().summary(),
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));

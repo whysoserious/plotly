@@ -351,6 +351,11 @@ impl App {
             self.help = false;
             return true;
         }
+        // The missing link when a key "stops working": this says whether it
+        // reached the program at all and what it became, which separates a
+        // terminal or keyboard problem from a binding one. Debug, because it
+        // fires on every arrow press while jogging.
+        tracing::debug!(key = ?key.code, ?action, "key");
         // A fresh action clears the last plan's note.
         self.note = None;
         match action {
@@ -903,6 +908,75 @@ mod tests {
             PEN_Z_RANGE.contains(&app.pen_down_z()),
             "ran past the bottom: {}",
             app.pen_down_z()
+        );
+    }
+
+    /// The same app, plus a handle on what actually reaches the wire — the only
+    /// way to tell "the key is bound" from "the key does something".
+    fn app_and_wire() -> (App, Arc<Mutex<Vec<String>>>) {
+        let transport = MockTransport::new();
+        let sent = transport.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(transport),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+        };
+        let app = App::new(
+            worker,
+            machine,
+            test_profile(),
+            Vec::new(),
+            None,
+            None,
+            LogRing::new(),
+        );
+        (app, sent)
+    }
+
+    /// Wait for the worker thread to catch up with what it was sent.
+    fn wire_settles(sent: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        for _ in 0..200 {
+            std::thread::sleep(Duration::from_millis(5));
+            let lines = sent.lock().unwrap().clone();
+            if !lines.is_empty() {
+                return lines;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Space must reach the machine, not merely resolve to an action. The key
+    /// map has a test of its own and it passes; this covers the rest of the
+    /// path, which is where a regression would actually sit.
+    #[test]
+    fn space_toggles_the_pen_all_the_way_to_the_wire() {
+        let (mut app, sent) = app_and_wire();
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let lines = wire_settles(&sent);
+        assert!(
+            lines.iter().any(|l| l.contains(" Z")),
+            "space sent no Z move: {lines:?}"
+        );
+    }
+
+    /// A pen-depth nudge must not swallow the key that ended it.
+    #[test]
+    fn a_depth_nudge_leaves_the_next_key_alone() {
+        let (mut app, sent) = app_and_wire();
+        app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        sent.lock().unwrap().clear();
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let lines = wire_settles(&sent);
+        assert!(
+            lines.iter().any(|l| l.contains(" Z")),
+            "space after a nudge sent no Z move: {lines:?}"
         );
     }
 
