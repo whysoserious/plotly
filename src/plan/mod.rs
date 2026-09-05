@@ -135,6 +135,9 @@ pub struct PlanSettings {
     /// How much of each end of a stroke to draw slowly, mm. Zero disables the
     /// ramp and every stroke runs at [`PlanSettings::draw_feed`] throughout.
     pub ramp_mm: f64,
+    /// How sharp a corner has to be, in degrees, to get the slow treatment.
+    /// Zero would ramp every subdivided joint; a straight run has none.
+    pub ramp_angle_deg: f64,
     /// Feed for those ends, mm/min (§2.9a).
     ///
     /// A tube nib dragged at speed deflects backwards, and when the machine
@@ -158,8 +161,11 @@ impl Default for PlanSettings {
             // `draw_feed` at `$120 = 3000`. Longer costs real time for nothing
             // — on a 6312-shape plot, 2 mm at F300 adds 70 minutes where
             // 0.5 mm adds 18, and 0.5 mm at F600 adds 8.
-            ramp_mm: 0.5,
-            ramp_feed: 300,
+            // Measured on the machine with `fence --rampladder`: one
+            // millimetre is the shortest lead-in whose corners come out clean.
+            ramp_mm: 1.0,
+            ramp_feed: 1000,
+            ramp_angle_deg: 20.0,
         }
     }
 }
@@ -446,61 +452,114 @@ fn push_stroke(ops: &mut Vec<Op>, from: Point, points: &[Point], settings: &Plan
         }
         out
     };
-    let total: f64 = {
-        let mut prev = from;
-        steps.iter().fold(0.0, |acc, p| {
-            let d = (p.x - prev.x).hypot(p.y - prev.y);
-            prev = *p;
-            acc + d
-        })
-    };
-
     let ramp = settings.ramp_mm.max(0.0);
-    // Nothing to ramp into, or no room for a fast middle: one feed throughout.
-    if ramp == 0.0 || total <= 2.0 * ramp {
-        let feed = if ramp == 0.0 {
-            settings.draw_feed
-        } else {
-            settings.ramp_feed
-        };
-        ops.push(Op::SetFeed(feed));
+    if ramp == 0.0 {
+        ops.push(Op::SetFeed(settings.draw_feed));
         ops.extend(steps.into_iter().map(Op::MoveTo));
         return;
     }
 
-    ops.push(Op::SetFeed(settings.ramp_feed));
-    let mut feed = settings.ramp_feed;
+    let slow = slow_zones(from, points, ramp, settings.ramp_angle_deg);
+    let mut feed = 0;
     let mut prev = from;
     let mut done = 0.0;
     for step in steps {
         let seg = (step.x - prev.x).hypot(step.y - prev.y);
-        // Boundaries this segment crosses, in the order it meets them.
-        for (at, next) in [
-            (ramp, settings.draw_feed),
-            (total - ramp, settings.ramp_feed),
-        ] {
-            if feed == next || done >= at || done + seg <= at {
-                continue;
-            }
-            // Land exactly on the boundary, then change feed there.
-            let t = (at - done) / seg;
-            let split = to_micron(Point::new(
+        // Zone edges strictly inside this segment, in the order it meets them.
+        // They cut it into pieces, and each piece takes the feed of its own
+        // middle — asking about the segment as a whole would give the piece
+        // after a cut the feed of the piece before it.
+        let mut edges: Vec<f64> = slow
+            .iter()
+            .flat_map(|(a, b)| [*a, *b])
+            .filter(|edge| *edge > done && *edge < done + seg)
+            .collect();
+        edges.sort_by(f64::total_cmp);
+
+        let mut at = done;
+        for edge in edges {
+            set_feed(ops, &mut feed, feed_at((at + edge) / 2.0, &slow, settings));
+            let t = (edge - done) / seg;
+            ops.push(Op::MoveTo(to_micron(Point::new(
                 prev.x + (step.x - prev.x) * t,
                 prev.y + (step.y - prev.y) * t,
-            ));
-            ops.push(Op::MoveTo(split));
-            ops.push(Op::SetFeed(next));
-            feed = next;
+            ))));
+            at = edge;
         }
-        // A boundary landing exactly on a segment start is not "crossed" above.
-        if done >= total - ramp && feed != settings.ramp_feed {
-            ops.push(Op::SetFeed(settings.ramp_feed));
-            feed = settings.ramp_feed;
-        }
+        set_feed(
+            ops,
+            &mut feed,
+            feed_at((at + done + seg) / 2.0, &slow, settings),
+        );
         ops.push(Op::MoveTo(step));
         done += seg;
         prev = step;
     }
+}
+
+/// Emit a feed change only when it changes something.
+fn set_feed(ops: &mut Vec<Op>, current: &mut u32, want: u32) {
+    if want != *current {
+        ops.push(Op::SetFeed(want));
+        *current = want;
+    }
+}
+
+/// Which feed applies at a distance along the stroke.
+fn feed_at(at: f64, slow: &[(f64, f64)], settings: &PlanSettings) -> u32 {
+    if slow.iter().any(|(a, b)| at >= *a && at <= *b) {
+        settings.ramp_feed
+    } else {
+        settings.draw_feed
+    }
+}
+
+/// The stretches of a stroke that must be drawn slowly, as merged, sorted
+/// `(from, to)` distances along it.
+///
+/// Both ends, because the pen starts and stops there, and `ramp` either side of
+/// every sharp corner, because a corner is a stop too: the machine decelerates
+/// into it, and a nib that has been dragged at speed unloads exactly there. The
+/// corners are the reason this is not simply "the first and last few
+/// millimetres" — a vpype hatch is one long stroke whose every turn is interior,
+/// so ramping only the ends leaves the whole serpentine at full speed (§2.5).
+fn slow_zones(from: Point, points: &[Point], ramp: f64, angle_deg: f64) -> Vec<(f64, f64)> {
+    let mut total = 0.0;
+    let mut corners = Vec::new();
+    let mut prev = from;
+    let mut incoming: Option<(f64, f64)> = None;
+    for &p in points {
+        let (dx, dy) = (p.x - prev.x, p.y - prev.y);
+        let len = dx.hypot(dy);
+        if len > 0.0 {
+            if let Some((px, py)) = incoming {
+                let cos = (px * dx + py * dy) / len;
+                if cos.clamp(-1.0, 1.0).acos().to_degrees() >= angle_deg {
+                    corners.push(total);
+                }
+            }
+            incoming = Some((dx / len, dy / len));
+            total += len;
+        }
+        prev = p;
+    }
+
+    let mut zones: Vec<(f64, f64)> = std::iter::once((0.0, ramp))
+        .chain(corners.into_iter().map(|at| (at - ramp, at + ramp)))
+        .chain(std::iter::once((total - ramp, total)))
+        .map(|(a, b)| (a.max(0.0), b.min(total)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    zones.sort_by(|a, b| a.0.total_cmp(&b.0));
+    zones.dedup_by(|next, cur| {
+        if next.0 <= cur.1 {
+            cur.1 = cur.1.max(next.1);
+            true
+        } else {
+            false
+        }
+    });
+    zones
 }
 
 /// Round a computed point to the micron.
@@ -662,6 +721,64 @@ mod tests {
             ..PlanSettings::default()
         };
         assert_eq!(stroke_feeds(40.0, &settings), vec![2000, 8000]);
+    }
+
+    /// A vpype hatch is one long stroke whose every turn is interior, so
+    /// ramping the ends alone leaves the whole serpentine at full speed. Each
+    /// corner has to be approached and left slowly, the same as an end.
+    #[test]
+    fn every_sharp_corner_inside_a_stroke_is_approached_slowly() {
+        let settings = PlanSettings {
+            ramp_mm: 3.0,
+            ramp_feed: 1000,
+            draw_feed: 2000,
+            ..PlanSettings::default()
+        };
+        // Two 40 mm passes joined by a 3 mm step: four right angles in all.
+        let serpentine = vec![
+            Point::new(0.0, 0.0),
+            Point::new(40.0, 0.0),
+            Point::new(40.0, 3.0),
+            Point::new(0.0, 3.0),
+        ];
+        let plan = Plan::build(&[serpentine], &Placement::identity(), &settings);
+        let feeds: Vec<u32> = plan.ops[plan.strokes[0].start_op..]
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetFeed(f) => Some(*f),
+                _ => None,
+            })
+            .collect();
+        // Slow in, fast, slow through the turn, fast, slow out, then travel.
+        assert_eq!(feeds, vec![1000, 2000, 1000, 2000, 1000, 8000], "{feeds:?}");
+    }
+
+    /// Corners gentle enough not to unload the nib are left alone, or a
+    /// subdivided curve would crawl from end to end.
+    #[test]
+    fn a_gentle_bend_does_not_earn_a_ramp() {
+        let settings = PlanSettings {
+            ramp_mm: 3.0,
+            ramp_feed: 1000,
+            draw_feed: 2000,
+            ramp_angle_deg: 20.0,
+            ..PlanSettings::default()
+        };
+        // A 4-degree kink, well under the threshold.
+        let gentle = vec![
+            Point::new(0.0, 0.0),
+            Point::new(20.0, 0.0),
+            Point::new(40.0, 1.4),
+        ];
+        let plan = Plan::build(&[gentle], &Placement::identity(), &settings);
+        let feeds: Vec<u32> = plan.ops[plan.strokes[0].start_op..]
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetFeed(f) => Some(*f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(feeds, vec![1000, 2000, 1000, 8000], "{feeds:?}");
     }
 
     #[test]

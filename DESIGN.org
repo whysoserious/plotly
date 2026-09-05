@@ -182,24 +182,47 @@ mniejsza, więc centrowanie było złym domyślnym.
 - To de facto realizuje „set origin" z kroku 5.4 w wersji bez osobnego klawisza: originem
   jest tam, gdzie stoi głowica.
 
-** 2.5 ROZWIĄZANE: haczyki na kreskach to docisk pióra (2026-09-02 … 09-05)
-*Objaw:* koniec (i początek) każdej kreski lekko zagięty. *Przyczyna: ~pen_down_z~.* Pod zbyt
-mocnym dociskiem z isografa wypływa nadmiar tuszu w punkcie kontaktu, a pierwszy ruch go
-rozmazuje. *Rozstrzygnięte drabinką dociskową* (~fence --zladder~, sześć kresek na jednej
-kartce, co 0,2 mm): rzędy *różnią się między sobą*, a najlżejszy, który jeszcze rysuje, jest
-bez haczyka.
+** 2.5 ROZWIĄZANE: haczyki to prędkość rysowania przy zatrzymaniach (2026-09-05)
+*Objaw:* na początku kreski ślad ~2 mm wystający *w stronę, z której przyjechało pióro*.
+Kluczowy był opis kierunku od użytkownika — przez trzy dni szukałem na *końcu* kreski, bo tak
+brzmiał pierwszy opis.
 
-*Wartość zależy od tego, jak pióro siedzi w uchwycie* — nie jest stałą maszyny. Po przesunięciu
-isografa w uchwycie (żeby kontakt wypadał w środku skoku Z, a nie na krawędzi pasma) wyszło
-*~pen_down_z = 5.25~*, a nie 4,2 z pierwszej drabinki. *Po każdej wymianie albo przesunięciu
-pióra trzeba to powtórzyć* — najszybciej klawiszami ~.~ / ~,~ w trakcie rysowania kreski.
+*Przyczyna: ~draw_feed~.* Rurkowa stalówka isografa ciągnięta z 33 mm/s jest odgięta; gdy
+maszyna zatrzymuje się albo skręca, odgięcie wraca i kładzie kreskę ~2 mm w stronę, z której
+głowica jechała. Przy dojeździe pod kątem prostym ten ślad *wystaje* z kreski; przy dojeździe
+wzdłuż osi *chowa się w niej* i wygląda jak kreska zaczęta wcześniej — dlatego sonda
+~--pen~ długo pokazywała „czysto".
 
-/Uwaga na margines:/ pasmo między „rysuje" a „nie dotyka" to ~0,2 mm~. Na A0 nierówność papieru
-bywa większa, więc jeśli fragmenty dużego arkusza wyjdą puste — podnieść o 0,1 mm.
-~--zladder --z-step 50~ robi przemiał co 0,05 mm, żeby stanąć w *środku* pasma, nie na krawędzi.
+*Zmierzone bisekcją* (~fence --pen~, po jednej zmiennej, dojazd trzymany na F8000):
+| ~--feed 300~ | czysto |
+| ~--feed 300 --travel-feed 8000~ | *czysto* — prędkość dojazdu nie ma nic do rzeczy |
+| ~--feed 600~ / ~--feed 1000~ | czysto |
+| ~--feed 1400~ / ~--feed 2000~ | haczyk |
+*Granica: ~F1000 czyste, F1400 nie.*
 
-*To nigdy nie był ruch maszyny* — i to jest najważniejsza treść tej sekcji, bo przez trzy dni
-szukałem po stronie ruchu.
+*Lekarstwo: rampa, nie globalne zwolnienie.* Ślad powstaje wyłącznie tam, gdzie pióro staje
+albo skręca, więc spowalniamy *tylko te miejsca* — pierwsze i ostatnie ~ramp_mm~ kreski *oraz
+~ramp_mm~ po obu stronach każdego rogu ostrzejszego niż ~ramp_angle_deg~* (20°).
+*Rogi wewnętrzne są tu istotą, nie dodatkiem:* hatch z vpype to jedna kreska, której wszystkie
+zakręty są w środku, więc rampa tylko-na-końcach zostawiała całego węża na pełnej prędkości —
+i dokładnie to zobaczyliśmy na papierze. Sąsiednie rogi zlewają się w jedną strefę, zamiast
+przełączać feed w tę i z powrotem.
+
+*Długość zmierzona drabinką* (~fence --rampladder~, sześć wężyków z rogiem prostym, jedna
+kartka, wiersz 1 bez rampy jako kontrola dodatnia): *1 mm to najkrótsza czysta rampa*.
+
+| ustawienie | ~output.svg~ | ~example.svg~ |
+|------------+--------------+---------------|
+| bez rampy (haczyki) | 6:24 | 2:44:30 |
+| *~ramp_mm = 1.0~, ~ramp_feed = 1000~* | *7:38* | *2:51:54* |
+| ramp 3 mm | 8:49 | 3:03:06 |
+| ~draw_feed = 1000~ wszędzie | 9:06 | 4:04:22 |
+Rampa kosztuje *7 minut* tam, gdzie globalne F1000 kosztuje *godzinę dwadzieścia*.
+
+/Sprostowanie:/ wcześniej zapisałem w 2.8, że „~draw_feed~ nie wpływa na czas". To było prawdą
+tylko dla *podnoszenia* go powyżej 2000, gdzie ogranicza przyspieszenie. W dół kosztuje bardzo
+dużo — i, co gorsza, potraktowałem to jak „nie wpływa na nic", przez co przez trzy dni nie
+sprawdziłem jedynego parametru, który okazał się sprawcą.
 
 ** 2.6 Co zostało obalone i czym (wszystko zmierzone)
 | hipoteza | czym obalona |
@@ -210,7 +233,7 @@ szukałem po stronie ruchu.
 | prędkość na złączu Z↔XY | ~$11 = 0.002~ + ~pen_fence = "off"~: bez zmian |
 | nakładanie się osi Z i XY | próbkowanie ~?~ co *6 ms*: XY w czasie ruchu Z = *0,030 mm* przy rozmyciu 0,10; pierwszy kontakt dokładnie na ~X-40.000~ |
 | mechanizm podnoszenia ciągnie w bok | ~--dip~ (czysty ruch Z, bez XY): *okrągłe kropki*, nie przecinki |
-| prędkość rysowania | ~--ladder~ F300…F12000: rzędy różnią się, ale sprawcą okazał się docisk (2.5) |
+| *docisk pióra* | drabinka ~--zladder~ wskazała ~Z4.2~, ale wynik *nie powtórzył się*; haczyki są przy każdej wysokości. Prawdopodobnie artefakt monotonicznej kolejności rzędów (2.9) |
 
 *Fakty o maszynie, które przy okazji wypadły z pomiarów:*
 - ~G4~ *synchronizuje* — trzymało 4,336 s przy ruchu 4,0 s, a ~?~ zaraz po ~ok~ dawało ~Idle~.

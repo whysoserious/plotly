@@ -88,6 +88,14 @@ fn main() -> io::Result<()> {
     probe.send_ok("G21", SHORT_WAIT);
     probe.send_ok("G90", SHORT_WAIT);
 
+    if opts.rampladder {
+        stage_rampladder(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
     if opts.zladder {
         stage_zladder(&mut probe, &opts);
         if confirm("\nDisable the motors now (`$SLP`)?") {
@@ -164,8 +172,13 @@ fn main() -> io::Result<()> {
 fn stage_pen(probe: &mut Probe, opts: &Options) {
     println!("\n---- what the axes actually do ----");
     println!(
-        "The pen will be lowered onto whatever is under it and drawn {} mm.",
-        opts.mm
+        "Travel {} mm south at F{} with the pen up, lower it, then draw {} mm east\n\
+         at F{} — a right-angle approach, so anything left on the end of the\n\
+         travel sticks out of the stroke instead of hiding along it.",
+        opts.mm,
+        opts.travel_feed(),
+        opts.mm,
+        opts.feed
     );
     if !confirm("Run it? (put paper under the pen)") {
         return;
@@ -186,12 +199,20 @@ fn stage_pen(probe: &mut Probe, opts: &Options) {
     // The driver's own sequence, sent back to back so the planner holds it all
     // and the machine runs it without waiting for us — the same conditions a
     // plot runs under with `pen_fence = "off"`.
+    // The approach is *perpendicular* to the stroke, and that is the whole
+    // point. Travelling along the same axis the stroke will use hides the
+    // artefact: a mark left on the last millimetres of the travel lies along
+    // the line and just looks like the line starting sooner. Come in at a
+    // right angle and the same mark sticks out where it can be seen — which is
+    // exactly how the operator sees it on a real plot, and how this probe
+    // missed it until now.
     let program = [
         format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
-        format!("G1 G91 X-{} F{}", opts.mm, opts.feed),
+        format!("G1 G91 Y-{} F{}", opts.mm, opts.travel_feed()),
         format!("G1 G90 Z{:.3} F{}", opts.pen_down_z, opts.z_feed),
         format!("G1 G91 X{} F{}", opts.mm, opts.feed),
         format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+        format!("G1 G91 Y{} F{}", opts.mm, opts.travel_feed()),
     ];
     let t0 = Instant::now();
     for line in &program {
@@ -385,9 +406,14 @@ fn stage_ladder(probe: &mut Probe, opts: &Options) {
     // is not the cause and the whole idea dies here. A test worth running is
     // one whose outcome is unambiguous either way.
     const FEEDS: [u32; 6] = [300, 1000, 2000, 4000, 8000, 12000];
+    let feeds: Vec<u32> = if opts.reverse {
+        FEEDS.iter().rev().copied().collect()
+    } else {
+        FEEDS.to_vec()
+    };
     println!("\n---- how fast can it draw and stay clean? ----");
     println!("Six strokes of {} mm, 5 mm apart, top to bottom:", opts.mm);
-    for (i, feed) in FEEDS.iter().enumerate() {
+    for (i, feed) in feeds.iter().enumerate() {
         println!("  row {}  F{feed}", i + 1);
     }
     println!("\nPick the last row whose ends are clean; that is your draw_feed.");
@@ -399,7 +425,7 @@ fn stage_ladder(probe: &mut Probe, opts: &Options) {
         &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
         SHORT_WAIT,
     );
-    for (i, feed) in FEEDS.iter().enumerate() {
+    for (i, feed) in feeds.iter().enumerate() {
         if i > 0 {
             // Back to the left edge and down a row, pen up.
             probe.send_ok(&format!("G1 G91 X-{} F{}", opts.mm, opts.feed), SHORT_WAIT);
@@ -423,6 +449,82 @@ fn stage_ladder(probe: &mut Probe, opts: &Options) {
     println!("\n  Six rows, F300 at the top down to F2000 at the bottom.");
 }
 
+/// Draw the same two-pass serpentine at a ladder of lead-in lengths.
+///
+/// The remaining question once the ramp works: how long does it have to be?
+/// Each row carries a different `ramp_mm`, and every row has a right-angle
+/// corner in the middle of the stroke — where the hook survives longest,
+/// because a corner is a stop the ends-only ramp never covered (§2.5).
+fn stage_rampladder(probe: &mut Probe, opts: &Options) {
+    let ramps: [f64; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0];
+    let pass = f64::from(opts.mm);
+    let ramp_feed = opts.ramp_feed();
+    println!("\n---- how long does the lead-in have to be? ----");
+    println!("Six two-pass serpentines, {pass:.0} mm a pass with a right-angle turn.");
+    println!(
+        "Drawn at F{}, slowed to F{ramp_feed} within N mm of an end or the turn:",
+        opts.feed
+    );
+    for (i, r) in ramps.iter().enumerate() {
+        println!(
+            "  row {}  ramp {r} mm{}",
+            i + 1,
+            if *r == 0.0 { "  (no ramp)" } else { "" }
+        );
+    }
+    println!("\nTake the shortest row whose corner is clean; that is your ramp_mm.");
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    for (i, &r) in ramps.iter().enumerate() {
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        if i > 0 {
+            probe.send_ok(&format!("G1 G91 Y-8 F{}", opts.travel_feed()), SHORT_WAIT);
+        }
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_down_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+
+        // East, turn south, west — with the first and last `r` mm of each pass
+        // and the whole turn taken at the slow feed, as the planner does it.
+        for (sign, label) in [(1.0, "east"), (-1.0, "west")] {
+            let _ = label;
+            if r > 0.0 {
+                probe.send_ok(&format!("G1 G91 X{:.3} F{ramp_feed}", sign * r), SHORT_WAIT);
+                probe.send_ok(
+                    &format!("G1 G91 X{:.3} F{}", sign * (pass - 2.0 * r), opts.feed),
+                    SHORT_WAIT,
+                );
+                probe.send_ok(&format!("G1 G91 X{:.3} F{ramp_feed}", sign * r), SHORT_WAIT);
+            } else {
+                probe.send_ok(
+                    &format!("G1 G91 X{:.3} F{}", sign * pass, opts.feed),
+                    SHORT_WAIT,
+                );
+            }
+            if sign > 0.0 {
+                let turn_feed = if r > 0.0 { ramp_feed } else { opts.feed };
+                probe.send_ok(&format!("G1 G91 Y-3 F{turn_feed}"), SHORT_WAIT);
+            }
+        }
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        println!("  row {} drawn with ramp {r} mm", i + 1);
+    }
+    println!("\n  Six rows, no ramp at the top, 4 mm at the bottom.");
+}
+
 /// Draw the same stroke at a ladder of pen-down heights, all on one sheet.
 ///
 /// The one pen-side variable never tried. `--dip` proved the dots are ink
@@ -431,9 +533,12 @@ fn stage_ladder(probe: &mut Probe, opts: &Options) {
 /// which is what a hook at the *start* of a stroke would be. Heavier pressure
 /// floods more ink; lighter eventually starves the line.
 fn stage_zladder(probe: &mut Probe, opts: &Options) {
-    let heights: Vec<f32> = (0..6)
+    let mut heights: Vec<f32> = (0..6)
         .map(|i| opts.pen_down_z - i as f32 * opts.z_step)
         .collect();
+    if opts.reverse {
+        heights.reverse();
+    }
     println!("\n---- how hard should the pen press? ----");
     println!("Six strokes of {} mm, 5 mm apart, top to bottom:", opts.mm);
     for (i, z) in heights.iter().enumerate() {
@@ -700,14 +805,43 @@ struct Options {
     ladder: bool,
     /// Run the pen-pressure-ladder stage.
     zladder: bool,
+    /// Run the lead-in-length ladder.
+    rampladder: bool,
+    /// Feed for a ramp's slow stretches, mm/min. Defaults to a third of `feed`.
+    ramp_feed: Option<u32>,
     /// Step between rows of the pressure ladder, mm.
     z_step: f32,
+    /// Feed for the pen-up approach, mm/min. Defaults to `feed`.
+    ///
+    /// Its own knob because it is the one number the plot and this probe most
+    /// differ on: a plot travels at 8000, which at `$120 = 3000` needs 2.9 mm
+    /// to stop — and the mark left on the paper is about 2 mm long.
+    travel_feed: Option<u32>,
+    /// Draw a ladder's rows in the opposite order.
+    ///
+    /// A ladder walks one variable in one direction, which means *position in
+    /// the sequence* walks with it — and a technical pen's ink flow changes as
+    /// it is used, so the two are confounded. "Row 5 was clean" could mean the
+    /// fifth pressure or the fifth minute. Running the same ladder reversed
+    /// separates them: if the clean row keeps its *value*, the variable is
+    /// real; if it keeps its *position*, it was the pen, not the setting.
+    reverse: bool,
     pen_up_z: f32,
     pen_down_z: f32,
     z_feed: u32,
 }
 
 impl Options {
+    /// Feed for the pen-up approach: its own if given, else the drawing feed.
+    fn travel_feed(&self) -> u32 {
+        self.travel_feed.unwrap_or(self.feed)
+    }
+
+    /// Feed for a ramp's slow stretches.
+    fn ramp_feed(&self) -> u32 {
+        self.ramp_feed.unwrap_or((self.feed / 2).max(1))
+    }
+
     fn parse(args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut opts = Self {
             port: None,
@@ -718,7 +852,11 @@ impl Options {
             dip: false,
             ladder: false,
             zladder: false,
+            rampladder: false,
+            ramp_feed: None,
             z_step: 0.2,
+            travel_feed: None,
+            reverse: false,
             pen_up_z: 0.5,
             pen_down_z: 5.0,
             z_feed: 5000,
@@ -744,6 +882,10 @@ impl Options {
                 "--dip" => opts.dip = true,
                 "--ladder" => opts.ladder = true,
                 "--zladder" => opts.zladder = true,
+                "--rampladder" => opts.rampladder = true,
+                "--ramp-feed" => opts.ramp_feed = Some(number(args.next(), "--ramp-feed")?),
+                "--reverse" => opts.reverse = true,
+                "--travel-feed" => opts.travel_feed = Some(number(args.next(), "--travel-feed")?),
                 "--z-step" => opts.z_step = number(args.next(), "--z-step")? as f32 / 1000.0,
                 "--pen-up-z" => opts.pen_up_z = number(args.next(), "--pen-up-z")? as f32 / 1000.0,
                 "--pen-down-z" => {
@@ -780,7 +922,10 @@ fn print_usage() {
          --baud <n>      baud rate (default: {DEFAULT_BAUD})\n  \
          --ladder        draw the same stroke at F300..F12000, one sheet\n  \
          --zladder       draw it at six pen-down heights, one sheet\n  \
+         --rampladder    draw a cornered stroke at six lead-in lengths, one sheet\n  \
+         --ramp-feed <n>  feed for a ramp's slow stretches (default: half --feed)\n  \
          --z-step <n>    step between those heights, thousandths of a mm (default: 200)\n  \
+         --reverse       draw a ladder's rows in the opposite order\n  \
          --dip           dip the pen straight down and up, no XY: does it mark sideways?\n  \
          --pen           sample the axes through a real pen-down / draw / pen-up\n  \
          --pen-up-z <n>  pen-up Z in thousandths of a mm (default: 500 = 0.5)\n  \
@@ -788,6 +933,7 @@ fn print_usage() {
          --z-feed <n>    feed for the pen's Z move (default: 5000)\n  \
          --mm <n>        length of the test move, mm (default: 40)\n  \
          --feed <n>      feed for the test move, mm/min (default: 600)\n  \
+         --travel-feed <n>  feed for the pen-up approach (default: same as --feed)\n  \
          --list-ports    list detected iDraw ports and exit\n"
     );
 }
