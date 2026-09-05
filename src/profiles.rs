@@ -160,6 +160,8 @@ impl Profile {
             jog_feed,
             max_feed,
             max_segment_mm,
+            ramp_mm,
+            ramp_feed,
             accel_mm_s2,
             junction_deviation_mm,
         } = *over;
@@ -184,6 +186,8 @@ impl Profile {
         set(&mut self.jog_feed, jog_feed);
         set(&mut self.max_feed, max_feed);
         set(&mut self.plan.max_segment_mm, max_segment_mm);
+        set(&mut self.plan.ramp_mm, ramp_mm.map(|mm| mm.max(0.0)));
+        set(&mut self.plan.ramp_feed, ramp_feed);
         set(&mut self.accel_mm_s2, accel_mm_s2);
         set(&mut self.junction_deviation_mm, junction_deviation_mm);
     }
@@ -245,6 +249,9 @@ impl Profile {
         // The pen's XY feed is what a Z move restores afterwards (§2.2), so it
         // is an XY feed too.
         self.pen.xy_feed = self.pen.xy_feed.min(self.max_feed);
+        // A ramp above the drawing feed would speed the ends *up*, which is the
+        // opposite of the point.
+        self.plan.ramp_feed = self.plan.ramp_feed.min(self.plan.draw_feed);
     }
 
     /// One line for the status bar: `idraw-a0 841×1189`.

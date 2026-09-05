@@ -182,225 +182,95 @@ mniejsza, więc centrowanie było złym domyślnym.
 - To de facto realizuje „set origin" z kroku 5.4 w wersji bez osobnego klawisza: originem
   jest tam, gdzie stoi głowica.
 
-** 2.5 Ogrodzenie ruchu pióra — dlaczego linia nie kończy się haczykiem (2026-09-02)
-*Objaw (sprzęt):* koniec każdej kreski jest lekko zagięty *w stronę następnego przejazdu* —
-pióro „zaczyna skręcać, zanim skończy rysować". Symetrycznie: przy opuszczaniu zostaje
-kropka/dziobek na starcie kształtu.
+** 2.5 ROZWIĄZANE: haczyki na kreskach to docisk pióra (2026-09-02 … 09-05)
+*Objaw:* koniec (i początek) każdej kreski lekko zagięty. *Przyczyna: ~pen_down_z~.* Pod zbyt
+mocnym dociskiem z isografa wypływa nadmiar tuszu w punkcie kontaktu, a pierwszy ruch go
+rozmazuje. *Rozstrzygnięte drabinką dociskową* (~fence --zladder~, sześć kresek na jednej
+kartce, od ~Z5.0~ w dół co 0,2 mm): rzędy *różnią się między sobą*, ~Z4.2~ jest *bez haczyka*,
+~Z4.0~ już nie dotyka papieru. *Ustawienie: ~pen_down_z = 4.2~.*
 
-*Przyczyna.* ~ok~ znaczy „przyjęto do bufora", nie „narysowano" (15.1). Cztery linie ruchu
-pióra same z siebie tylko dołączają do kolejki planera, a *lookahead Grbla przenosi prędkość
-przez róg* między ostatnim odcinkiem kreski a ruchem Z: junction deviation ~$11 = 0.010~ przy
-~$120 = 3000~ mm/s² daje na kącie prostym ~v = sqrt(a·δ·sin(θ/2)/(1−sin(θ/2))) ≈ 8,5 mm/s~,
-zabrane *natychmiast* w bok. Tak ostro maszyna nie skręca: pasek i uchwyt pióra się uginają
-i końcówka — *wciąż na papierze* — rysuje mały haczyk w stronę, w którą zaraz pojedzie.
-To nie jest błąd geometrii (Grbl trzyma ścieżkę dokładnie), tylko mechanika rogu branego
-z prędkością.
+/Uwaga na margines:/ pasmo między „rysuje" a „nie dotyka" to ~0,2 mm~. Na A0 nierówność papieru
+bywa większa, więc jeśli fragmenty dużego arkusza wyjdą puste — podnieść o 0,1 mm.
+~--zladder --z-step 50~ robi przemiał co 0,05 mm, żeby stanąć w *środku* pasma, nie na krawędzi.
 
-*Lekarstwo — kolejność wymuszona ~G4~* (~Driver::set_pen~). Grbl wykonuje dwell *dopiero po
-opróżnieniu bufora planera*, więc dwell jest barierą „naprawdę zrobione":
-#+begin_example
-G4 P0.01                 <- kreska jest naprawdę narysowana (pełny stop)
-G1 G90 Z<z> F<z_feed>    <- dopiero teraz pióro się rusza
-G4 P<pen_settle_secs>    <- Z skończone + pióro przestało dyndać
-G1 F<xy_feed>            <- i wracamy do feedu XY
-#+end_example
-Koszt: realny stop i dwa round-tripy na każdy ruch pióra. Tyle kosztuje czysty koniec linii —
-i tak właśnie *od początku liczy estymata* (8.1: run zaczyna i kończy się w bezruchu).
-- ~pen_settle_secs~ (domyślnie *0,05 s*) jest w profilu i w ~config.toml~ — jedyna liczba
-  pióra bez oparcia w ~$$~. Sam ruch Z jest już wtedy skończony (pilnuje tego ~G4~), więc to
-  wyłącznie mechanika: sprężynujący uchwyt.
-- *Ścieżka panic (~Ctrl-C~) omija bariery* (~Driver::move_pen_now~): nie może czekać, aż
-  wyjedzie bufor z sekundami przejazdu.
+*To nigdy nie był ruch maszyny* — i to jest najważniejsza treść tej sekcji, bo przez trzy dni
+szukałem po stronie ruchu.
 
-*POMIAR: ~G4~ SYNCHRONIZUJE (2026-09-02, ~cargo run --example fence~).* Przy ruchu trwającym
-4,0 s ~G4 P0.01~ trzymało *4,336 s*, a ~?~ zaraz po ~ok~ pokazywało już ~Idle~. Odpytywanie ~?~
-dało 4,689 s. *Obie bariery są prawdziwe*, a ❓ z 15.3 jest zamknięte pomiarem, nie założeniem.
-(Referencja ma ~G4~ w ~doTimedPause~ zakomentowane — teraz wiadomo, że nie z powodu firmware'u.)
+** 2.6 Co zostało obalone i czym (wszystko zmierzone)
+| hipoteza | czym obalona |
+|----------+--------------|
+| kolejność podniesienia pióra | bariery ~G4~ założone; haczyki bez zmian |
+| prędkość w rogu (~$11~) | haczyki także w bloku *C* ~hook-test.svg~, gdzie po kresce nie ma *nic* |
+| akceleracja (~$120/$121~) | pierwszy „eksperyment" się nie odbył (~$$~ pokazało nietknięte 3000); po faktycznym zejściu na 500 — bez zmian |
+| prędkość na złączu Z↔XY | ~$11 = 0.002~ + ~pen_fence = "off"~: bez zmian |
+| nakładanie się osi Z i XY | próbkowanie ~?~ co *6 ms*: XY w czasie ruchu Z = *0,030 mm* przy rozmyciu 0,10; pierwszy kontakt dokładnie na ~X-40.000~ |
+| mechanizm podnoszenia ciągnie w bok | ~--dip~ (czysty ruch Z, bez XY): *okrągłe kropki*, nie przecinki |
+| prędkość rysowania | ~--ladder~ F300…F12000: rzędy różnią się, ale sprawcą okazał się docisk (2.5) |
 
-*A MIMO TO HACZYKI ZOSTAŁY.* Pierwsza hipoteza po pomiarze — że winne są *rogi 90° w hatchu
-z vpype*, gdzie pióro w ogóle się nie podnosi (serpentyna: 35,9 mm, róg, krok 1,134 mm, róg;
-62–128 rogów w jednej polilinii) — *nie potwierdziła się*. Grbl przenosi przez taki róg
-~sqrt(3000·0,010·2,414) = 8,5 mm/s~, ale wydruk ~hook-test.svg~ pokazał haczyki *także tam, gdzie
-tego mechanizmu nie ma*.
+*Fakty o maszynie, które przy okazji wypadły z pomiarów:*
+- ~G4~ *synchronizuje* — trzymało 4,336 s przy ruchu 4,0 s, a ~?~ zaraz po ~ok~ dawało ~Idle~.
+  To zamyka ❓ z 15.3 *pomiarem*. Ma przy tym *podłogę ~50 ms*, nawet gdy nie ma na co czekać.
+- *Ruch Z 4,5 mm trwa ~240 ms*, nie 54 ms jak wychodzi z ~z_mm/z_feed~ przy ~F5000~. Oś Z jedzie
+  ~4× wolniej, niż każe feed; ~$112 = 15000~ tego nie tłumaczy. */Wciąż niewyjaśnione./*
+  Konsekwencja: estymata pen-move'ów jest optymistyczna, a to one dominują rysunki z vpype.
+- ~serde_json~ *nie round-tripuje ~f64~*: ~1.1094003924504545~ wraca jako ~…543~. Plan wraca
+  z ~plan.jsonl~ przy wznawianiu, więc liczone punkty są zaokrąglane do mikrona
+  (~plan::to_micron~) — drut i tak niesie ~{:.3}~, a maszyna ma krok 0,01 mm.
 
-** Co pokazał ~hook-test.svg~ (2026-09-02)
-Wydruk rozdziela trzy zakończenia tej samej kreski 40 mm:
-- *A* — serpentyna: rogi 90° *z piórem na dole* (jak hatch z vpype);
-- *B* — osobne kreski: koniec = *podniesienie pióra* + 40 mm przejazdu w lewo-w-dół;
-- *D* — osobne kreski na przemian L→P i P→L: podniesienie + *3 mm* przejazdu (koniec kreski
-  zmienia stronę, więc widać, czy ślad powstaje na *końcu* czy na *starcie*);
-- *C* — jedna kreska na końcu pliku: podniesienie, po którym *nie ma nic*.
-
-*Wynik: haczyki w A, B i C.* (Pierwszy odczyt „A i C czyste" nie potwierdził się przy
-powtórce — zapisane, bo to właśnie ten odczyt wysłał mnie w ~$11~.)
-
-*Co z tego wynika.* Ślad powstaje również tam, gdzie *nic nie następuje po kresce* (C) — więc
-nie robi go ani przejazd, ani kolejność podniesienia pióra, ani prędkość w rogu. Wspólny
-mianownik A, B i C to *ostre zatrzymanie albo zmiana kierunku z piórem na papierze*.
-
-*NIE ROZSTRZYGNIĘTE — i uwaga na fałszywy trop.* W trakcie prób haczyki raz zniknęły, co
-wyglądało na potwierdzenie akceleracji. *~$$~ z maszyny (23:01) pokazało ~$120=3000.000~,
-~$121=3000.000~, ~$11=0.010~ — nic nigdy nie zostało zmienione.* Eksperyment z akceleracją
-*nie odbył się*, a raporty z papieru („B tak, A i C nie" → „wszystkie trzy" → „zniknęły" →
-„znowu są") rozjeżdżają się przy niezmienionej maszynie. To znaczy, że *artefakt jest blisko
-progu widoczności* i pojedyncze oględziny nie są pomiarem.
-
-/Wniosek proceduralny:/ zmiana ~$~ jest do *zweryfikowania w logu*, nie do zapamiętania —
-dlatego ~accel_mm_s2~ i ~junction_deviation_mm~ są od teraz w linii INFO ~machine profile~
-(wcześniej były tylko na DEBUG, czyli nigdzie). Jeden ~grep "machine profile" plotly.log~
-mówi, z czym maszyna naprawdę jedzie.
-
-*I dalej:* skoro te dwie liczby okazały się kluczowe, a wpisanie ich ręcznie w konsolę było tym
-etapem, który dwa razy się nie udał — *config je ustawia*. ~accel_mm_s2~ i
-~junction_deviation_mm~ w ~config.toml~ są jedynymi polami, które lecą *na płytkę*
-(~Driver::write_setting~ → ~$120~/~$121~/~$11~), i to tylko wtedy, gdy użytkownik wymienił je
-z nazwy *i* ~$$~ pokazuje co innego. Zapis idzie do EEPROM-u, więc: raz na start, nigdy
-z domyślnych profilu. Strojenie maszyny przestaje być czymś, co ktoś kiedyś wklepał.
-
-*Hipoteza o akceleracji nadal stoi* — ~$120 = 3000 mm/s²~ to 0,3 g rzucane w bramę A0 na końcu
-każdej kreski, a przy ~draw_feed~ 2000 mm/min maszyna staje w 11 ms na 0,18 mm — ale jest
-*niesprawdzona*.
-
-** 2.6 Co naprawdę kosztuje czas (zmierzone estymatorem, 2026-09-02)
-~example.svg~, 6312 kształtów, model z ~plan/estimate.rs~:
-| ustawienie | czas |
-| przed (accel 3000, settle .05/.05, skok 4,5 mm) | 2:08:31 |
-| accel 500 — cena za czyste kreski | 2:33:44 |
-| + settle po opuszczeniu = 0 | 2:28:29 |
-| + skok pióra 2,0 mm (~pen_up_z = 3.0~) | 2:22:10 |
-| + accel 1500 | *2:02:29* |
-| + ~draw_feed~ 3000 | 2:02:29 /(bez zmiany)/ |
-
-Dwie rzeczy, które z tego wynikają i nie są oczywiste:
-1. *Akceleracja jest jedyną dużą dźwignią* — 25 minut na dwugodzinnym rysunku. Warto szukać
-   *najwyższej* wartości, przy której kreski są jeszcze czyste (1000? 1500?), zamiast zostawiać
-   500 „na wszelki wypadek". ~$122~ (Z) to inna oś — może zostać wysoko, bo od niej zależy,
-   jak szybko pióro idzie w górę.
-2. *~draw_feed~ nie robi nic.* Rysowanie jest ograniczone *przyspieszeniem*, nie prędkością:
-   przy odcinkach hatcha maszyna nie zdąża rozpędzić się do zadanego feedu. Podnoszenie
-   ~draw_feed~ to złudzenie ruchu.
-
-** 2.7 Kropka na starcie kreski — ZMIERZONE (2026-09-02)
-Z ~-vv~ (TRACE zapisuje każdą linię na drucie z mikrosekundowym stemplem), ~hook-test.svg~,
-n=14 kształtów, bez ani jednego wyjątku:
+** 2.7 Kropka na starcie kreski — ZMIERZONE i naprawione
+~-vv~ zapisuje każdą linię na drucie z mikrosekundowym stemplem. n=14, bez wyjątku:
 | pióro *na papierze*, nieruchomo, przed pierwszym ruchem | *298 ms* (min 297, max 304) |
-| pióro w górze, przed przejazdem | 350 ms |
 
-Rozbicie opuszczania:
-#+begin_example
-G1 G90 Z5.000 F5000    pióro siada
-   6 ms  G4 P0.000     bariera
- 286 ms  G1 F2000      <- ok z G4 przyszło dopiero teraz
-  18 ms  G1 X5.000     pierwszy ruch
-#+end_example
-
-*Ćwierć sekundy stania mokrą końcówką na papierze, przy każdym kształcie.* To jest kropka —
-nie „prawdopodobnie", tylko zmierzone.
-
-Winna była *bariera po wylądowaniu*, i to jest wina naszego kodu, nie maszyny. Ta bariera nie
-kupowała nic: *Grbl wykonuje bloki po kolei*, więc ruch XY i tak ruszy dopiero po ruchu Z.
-Czekaliśmy na ~ok~, żeby dowiedzieć się o kolejności, którą firmware i tak gwarantuje.
-*Bariery po ruchu Z nie ma teraz wcale, chyba że settle jej zażąda* — settle to jedyna rzecz,
-której nie da się dostać inaczej. Przy okazji ~298 ms × 6312 kształtów = *~31 minut* na
+Winna była *bariera po wylądowaniu*, i to wina naszego kodu. Nie kupowała nic: Grbl wykonuje
+bloki po kolei, więc ruch XY i tak rusza dopiero po ruchu Z — czekaliśmy na ~ok~, żeby
+dowiedzieć się o kolejności, którą firmware gwarantuje. *Barierę po ruchu Z wysyłamy tylko
+wtedy, gdy settle jej zażąda*, a settle jest rozdzielony: ~pen_settle_up_secs = 0.05~ (bezruch
+w powietrzu kosztuje czas), ~pen_settle_down_secs = 0~ (bezruch na papierze kosztuje tusz).
+Referencja dzieli to tak samo (~pen_delay_up~ / ~pen_delay_down~). Zysk: ~31 minut na
 ~example.svg~.
 
-*Dwa fakty o maszynie, które przy okazji wypadły z pomiaru:*
-1. ~G4~ ma *podłogę ~50 ms* — tyle trwa nawet wtedy, gdy nie ma na co czekać.
-2. *Ruch Z 4,5 mm trwa ~240 ms*, a nie 54 ms, jak wychodzi z ~z_mm / z_feed~ przy ~F5000~.
-   Oś Z jedzie ~4× wolniej, niż każe jej feed. Skąd — nie wiadomo; ~$112 = 15000~ tego nie
-   tłumaczy. *Konsekwencja dla estymaty:* ~Machine::pen_up_secs~/~pen_down_secs~ liczone
-   z ~z_mm/z_feed~ są mocno optymistyczne, a pen-move'y to na rysunkach z vpype dominujący
-   koszt (2.6). Do poprawienia, gdy będzie wiadomo, czy czas Z zależy od dystansu (test:
-   ~pen_up_z = 3.0~ powinno zbić go do ~105 ms, jeśli tak).
+~--dip~ potwierdził resztę: sześć dotknięć czystym ruchem Z z rosnącym postojem daje *okrągłe
+kropki rosnące z czasem postoju* — czyli kropka to wypływ tuszu, nie ruch. Ta sama fizyka co
+haczyk z 2.5, tylko bez rozmazania.
 
-** 2.8 Kropka i haczyk to jedna zmienna (2026-09-02)
-Wydruk przy ~accel_mm_s2 = 500~ (zweryfikowane w logu) dał parę, która rozstrzyga mechanizm:
-| przejście | bariera po ruchu Z | co na papierze |
-| *opuszczenie* | usunięta (settle = 0) | *haczyk*, brak kropki |
-| *podniesienie* | jest (~G4~ + settle 50 ms) | *kropka*, brak haczyka |
+*Bariera ~pen_fence~ wypada.* Para z kontrolą dodatnią — ~"dwell"~ vs ~"off"~, ten sam papier,
+to samo pióro — dała haczyki *nie do odróżnienia*. Kosztuje podłogę 50 ms ~G4~ ×2 na kształt
+(~10 minut na ~example.svg~) i nie kupuje nic. Przełącznik zostaje, domyślnie ~"off"~
+w konfiguracji.
 
-To nie są dwa problemy, tylko *jeden kompromis widziany z dwóch stron*:
-- *bariera* = postój z końcówką na papierze = tusz się zbiera = *kropka*;
-- *brak bariery* = ruch XY rusza w chwili dotknięcia, z prędkością zabraną ze złącza Z↔XY
-  = *haczyk*.
-Barierą tego nie da się wygrać — trzeba usunąć *powód*, dla którego jest potrzebna.
+** 2.8 Co naprawdę kosztuje czas (estymator, ~example.svg~ = 6312 kształtów)
+| bez ruchów pióra (sama geometria) | 1:46:39 |
+| stan wyjściowy | 2:54:49 |
+| ~pen_fence = "off"~ (znika podłoga ~G4~) | 2:44:17 |
+| + skok pióra 2,0 mm (~pen_up_z = 3.0~), */jeśli/* czas Z zależy od dystansu | 2:16:18 |
+| + ~pen_settle_up_secs = 0~ | 2:11:03 |
+Dwie rzeczy nieoczywiste: *ruchy pióra to ~40% wydruku*, a *~draw_feed~ nie wpływa na czas
+w ogóle* — rysowanie jest ograniczone przyspieszeniem, nie prędkością, więc na odcinkach
+hatcha maszyna nie zdąża rozpędzić się do zadanego feedu.
 
-*Powodem jest prędkość na złączu Z↔XY, czyli znowu ~$11~.* Ruch pióra i ruch XY to zawsze
-kąt prosty, więc planer przenosi przez nie ~sqrt(a·δ·2,414)~:
-| accel | ~$11~ | prędkość na złączu Z↔XY |
-| 3000 | 0.010 | 8,5 mm/s |
-| 500 | 0.010 | 3,5 mm/s |
-| 500 | 0.002 | *1,55 mm/s* |
-| 500 | 0.0005 | 0,78 mm/s |
-Przy 1,5 mm/s pióro siada praktycznie w miejscu i dopiero potem rusza — *haczyka nie ma
-i postoju też nie ma*. Wtedy bariera przestaje być potrzebna po *obu* stronach, więc
-~pen_fence = "off"~ i przy okazji znika podłoga ~50 ms~ ~G4~ z każdego przejścia.
+*Rampa (~ramp_mm~ / ~ramp_feed~)* — rozbieg i wybieg kreski przy niższym feedzie — powstała pod
+hipotezę prędkościową i *nie jest już potrzebna* (~ramp_mm = 0~). Zostaje w planie, bo jest
+poprawnie policzona (granice lądują *na ścieżce*, kreska krótsza niż dwa rozbiegi jedzie wolno
+w całości) i może się przydać przy innym piórze.
 
-*Cena:* ~$11~ działa na *wszystkie* złącza pod kątem, więc rogi hatcha też zwalniają do
-~1,5 mm/s — przy accel 500 to ~0,13 s na róg. Na serpentynie ze 128 rogami ~17 s. Jeśli to
-zaboli, szuka się kompromisu w ~$11~, nie wraca do barier.
+** 2.9 Dlaczego to trwało trzy dni — o metodzie
+Bilans odczytów z papieru: „B tak, A i C nie" → „wszystkie trzy" → „zniknęły" → „znowu są" →
+„były cały czas" → „mikroskopijne" → „nadal w każdym wypadku". *Ani jeden nie powtórzył się
+przy tej samej konfiguracji*, a ja na każdym budowałem następną hipotezę. Commit ~ce96528~
+twierdzi „confirmed on paper: no hooks" — *to twierdzenie było nieważne*.
 
-/Gdyby kropka została mimo tego:/ następny podejrzany to *twarde lądowanie* (~pen_z_feed~,
-test ~1500~) i *docisk* (~pen_down_z~ w dół po 0,2 mm, aż kreska zacznie się rwać).
+Co działało: *pomiar z liczbą* (~G4~ 4,336 s; 298 ms, n=14; próbkowanie 6 ms; ~$$~ pokazujące
+nietknięte 3000; ~grep~ po wszystkich konfiguracjach) oraz — dopiero na końcu — *drabinka na
+jednej kartce*, gdzie pytanie brzmi „czy rzędy się różnią", a nie „czy widzę haczyk".
 
-** 2.9 Stan śledztwa nad artefaktami — punkt wejścia (2026-09-02, otwarte)
-Jeśli wracasz do tego na świeżo: *nie zaczynaj od hipotezy, zacznij od pomiaru.* Wszystko,
-co w tej sprawie cokolwiek rozstrzygnęło, było pomiarem; wszystko, co brzmiało sensownie
-i nie zostało zmierzone, okazało się nietrafione.
+Co nie działało: pytanie „czy widzisz artefakt" o rzecz leżącą na granicy widoczności, przy
+porównywaniu z pamięcią, między wydrukami, w różnych sesjach.
 
-*Co jest UDOWODNIONE (pomiarem, z liczbą):*
-| ~G4~ synchronizuje | trzymało 4,336 s przy ruchu 4,0 s; ~?~ zaraz po ~ok~ = ~Idle~ | 2.5 |
-| ~G4~ ma podłogę ~50 ms | tyle trwa, gdy nie ma na co czekać | 2.7 |
-| ruch Z 4,5 mm trwa ~240 ms | a nie 54 ms z ~z_mm/z_feed~; *oś Z jedzie 4× wolniej niż feed każe* — /niewyjaśnione/ | 2.7 |
-| pióro stało 298 ms na papierze | n=14, mediana 298, min 297, max 304 — *usunięte* | 2.7 |
-| host wysyła poprawną kolejność | zrzut z mocka: kreska → ~G4~ → Z → feed → przejazd | 2.5 |
-| maszyna miała ~$120=$121=3000~, ~$11=0.010~ | przez cały czas, mimo przekonania, że zmieniono | 2.5 |
-| *ruch maszyny jest czysty* | 2597 próbek co 6 ms: XY w czasie ruchu Z = *0,030 mm* (rozmycie 0,10), postój na papierze *8 ms*, ~first touch~ dokładnie na ~X-40.000~ | 2.10 |
-
-*Co zostało OBALONE (i czym):*
-- /„to kolejność podniesienia pióra"/ — bariery ~G4~ założone i zmierzone; haczyki bez zmian.
-- /„to prędkość w rogu hatcha (~$11~)"/ — haczyki są też w bloku *C* ~hook-test.svg~, gdzie po
-  kresce *nie ma nic*: ani rogu, ani przejazdu, ani następnego kształtu.
-- /„to akceleracja"/ — *eksperyment się nie odbył* (~$$~ pokazało nietknięte 3000). Po
-  faktycznym zejściu na 500: artefakty zostały. Hipoteza *obalona*, nie „niesprawdzona".
-- /„to prędkość na złączu Z↔XY"/ — ~$11 = 0.002~ (1,55 mm/s) + ~pen_fence = "off"~: bez zmian.
-
-** 2.10 Ruch maszyny jest czysty — ślady robi pióro (2026-09-03)
-~cargo run --example fence -- --pen --feed 300~, 2597 próbek co 6 ms (rozmycie 0,10 mm):
-| XY przejechane, gdy Z też się ruszał | *0,030 mm* — poniżej rozmycia |
-| postój z końcówką na papierze, XY nieruchome | *8 ms* |
-| pierwszy kontakt | ~X-40.000 Y0.000 Z5.000~ — przejazd skończony *co do mikrona* |
-
-*Grbl serializuje bloki dokładnie tak, jak powinien.* Przejazd dobiega końca, dopiero potem
-pióro siada; w trakcie opadania nie jedzie na boki; po wylądowaniu nie stoi. *Ruch nie ma
-z artefaktami nic wspólnego* — a to obala całą rodzinę hipotez z 2.5–2.8 naraz.
-
-/Uwaga metodologiczna:/ pierwszy przebieg tego samego pomiaru dał „2,610 mm, osie się
-nakładają". Był to *artefakt przyrządu* — ~status()~ czekał pełne 80 ms okna, więc próbki szły
-co 108 ms, a przy 10 mm/s jedna próbka to 1,08 mm; trzy przejścia Z↔XY × jedna zgubiona próbka
-≈ dokładnie te 2,6 mm. Przyrząd, którego błąd jest wielkości efektu, nie mierzy efektu.
-~--pen~ wypisuje teraz własne rozmycie i ma trzeci werdykt: /inconclusive/.
-
-*Zostaje pióro.* Sekwencja jest po stronie maszyny bez zarzutu, więc ślad powstaje z tego, co
-robi tusz przy zaczynaniu i kończeniu kontaktu:
-- *docisk* — ~pen_down_z = 5.0~ dociska sprężynę; im mocniej, tym więcej tuszu na starcie.
-  Schodzić po 0,2 mm, aż kreska zacznie się rwać, i cofnąć o krok;
-- *wolne dosiadanie i odrywanie* — oś Z pokonuje 4,5 mm w ~240 ms (18 mm/s), *4× wolniej, niż
-  każe jej ~F5000~, i wciąż nie wiadomo dlaczego* (~$112 = 15000~ tego nie tłumaczy). Końcówka
-  jest przez kilkadziesiąt ms w lekkim kontakcie, nieruchoma — to jest okno na kałużę;
-- *samo pióro* — najtańszy test rozstrzygający: narysować ~hook-test.svg~ *innym pisakiem*.
-  Jeśli ślad zmienia charakter, temat jest zamknięty po stronie tuszu.
-
-*Konsekwencja dla ustawień:* ~$120/$121 = 500~ i ~$11 = 0.002~ były strojone pod obaloną
-hipotezę i kosztują ~25 minut na dwugodzinnym rysunku (2.6). *Wracamy na 3000 / 0.010* —
-tym bardziej że przy accel 500 pierwszy milimetr każdej kreski jest rysowany w trakcie
-rozpędzania (66 ms na 1,1 mm), czyli wolno, czyli grubo. Wyższa akceleracja robi *ostrzejszy
-start kreski*, nie gorszy.
-
-*Stan konfiguracji:* ~~/.config/plotly/config.toml~ wraca na ~accel_mm_s2 = 3000.0~ i
-~junction_deviation_mm = 0.010~ (plotly wpisze je do EEPROM-u przy starcie). ~pen_fence~
-zostaje ~"off"~ — pomiar 2.10 mówi, że bariera nie ma czego pilnować, a każda kosztuje postój
-z końcówką na papierze. *Zawsze weryfikuj w logu* — ~grep "machine profile" plotly.log | tail -1~.
+*Zasada:* przy artefakcie progowym *nie pytamy, czy jest* — robimy *drabinkę wariantów na
+jednym arkuszu*, tym samym piórem, w tej samej minucie, i pytamy, *który rząd jest inny*.
+Drabinka rozstrzygnęła w jednym wydruku to, czego dwadzieścia pojedynczych kartek nie
+rozstrzygnęło. Narzędzia: ~fence --ladder~ (feed), ~--zladder~ (docisk), ~--dip~ (sam ruch Z),
+~--pen~ (próbkowanie osi), ~hook-test.svg~ (rozdzielenie zakończeń kreski).
 
 * 3. Funkcje
 ** 3.1 MVP

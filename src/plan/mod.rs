@@ -132,6 +132,19 @@ pub struct PlanSettings {
     pub draw_feed: u32,
     /// Feed while travelling (pen up), mm/min.
     pub travel_feed: u32,
+    /// How much of each end of a stroke to draw slowly, mm. Zero disables the
+    /// ramp and every stroke runs at [`PlanSettings::draw_feed`] throughout.
+    pub ramp_mm: f64,
+    /// Feed for those ends, mm/min (§2.9a).
+    ///
+    /// A tube nib dragged at speed deflects backwards, and when the machine
+    /// stops — 11 ms at `$120 = 3000` — the deflection unloads into a hook at
+    /// the end of the stroke. Drawing the whole stroke slowly removes it and
+    /// costs the entire plot; drawing only the last few millimetres slowly
+    /// removes it where it happens, because the middle of a stroke never
+    /// stops. The same ramp opens a stroke, where the nib is loading up
+    /// instead.
+    pub ramp_feed: u32,
 }
 
 impl Default for PlanSettings {
@@ -140,6 +153,13 @@ impl Default for PlanSettings {
             max_segment_mm: 5.0,
             draw_feed: 2000,
             travel_feed: 8000,
+            // Half a millimetre is about the size of the artefact: the nib's
+            // own deflection plus the 0.18 mm the machine needs to stop from
+            // `draw_feed` at `$120 = 3000`. Longer costs real time for nothing
+            // — on a 6312-shape plot, 2 mm at F300 adds 70 minutes where
+            // 0.5 mm adds 18, and 0.5 mm at F600 adds 8.
+            ramp_mm: 0.5,
+            ramp_feed: 300,
         }
     }
 }
@@ -356,10 +376,9 @@ fn assemble<'a>(
         // Travel to the start with the pen up.
         push_moves(&mut ops, cursor, &[start], settings.max_segment_mm);
         ops.push(Op::PenDown);
-        ops.push(Op::SetFeed(settings.draw_feed));
 
-        // Draw the rest of the polyline.
-        push_moves(&mut ops, start, &placed[1..], settings.max_segment_mm);
+        // Draw the rest of the polyline, slow at both ends.
+        push_stroke(&mut ops, start, &placed[1..], settings);
         cursor = *placed.last().unwrap_or(&start);
 
         ops.push(Op::PenUp);
@@ -408,6 +427,96 @@ fn index_strokes(ops: &[Op]) -> Vec<Stroke> {
     // silently dropping geometry from the count.
     strokes.extend(current);
     strokes
+}
+
+/// Emit one pen-down stroke: subdivided moves with a slow lead-in and
+/// lead-out, and the drawing feed in between.
+///
+/// The feed ops go *between* moves, so the machine changes speed at a point on
+/// the path rather than mid-segment; a segment straddling a boundary is split
+/// at it. A stroke too short to hold both ramps is drawn slowly throughout —
+/// it is all end.
+fn push_stroke(ops: &mut Vec<Op>, from: Point, points: &[Point], settings: &PlanSettings) {
+    let steps: Vec<Point> = {
+        let mut out = Vec::new();
+        let mut prev = from;
+        for &target in points {
+            out.extend(subdivide(prev, target, settings.max_segment_mm));
+            prev = target;
+        }
+        out
+    };
+    let total: f64 = {
+        let mut prev = from;
+        steps.iter().fold(0.0, |acc, p| {
+            let d = (p.x - prev.x).hypot(p.y - prev.y);
+            prev = *p;
+            acc + d
+        })
+    };
+
+    let ramp = settings.ramp_mm.max(0.0);
+    // Nothing to ramp into, or no room for a fast middle: one feed throughout.
+    if ramp == 0.0 || total <= 2.0 * ramp {
+        let feed = if ramp == 0.0 {
+            settings.draw_feed
+        } else {
+            settings.ramp_feed
+        };
+        ops.push(Op::SetFeed(feed));
+        ops.extend(steps.into_iter().map(Op::MoveTo));
+        return;
+    }
+
+    ops.push(Op::SetFeed(settings.ramp_feed));
+    let mut feed = settings.ramp_feed;
+    let mut prev = from;
+    let mut done = 0.0;
+    for step in steps {
+        let seg = (step.x - prev.x).hypot(step.y - prev.y);
+        // Boundaries this segment crosses, in the order it meets them.
+        for (at, next) in [
+            (ramp, settings.draw_feed),
+            (total - ramp, settings.ramp_feed),
+        ] {
+            if feed == next || done >= at || done + seg <= at {
+                continue;
+            }
+            // Land exactly on the boundary, then change feed there.
+            let t = (at - done) / seg;
+            let split = to_micron(Point::new(
+                prev.x + (step.x - prev.x) * t,
+                prev.y + (step.y - prev.y) * t,
+            ));
+            ops.push(Op::MoveTo(split));
+            ops.push(Op::SetFeed(next));
+            feed = next;
+        }
+        // A boundary landing exactly on a segment start is not "crossed" above.
+        if done >= total - ramp && feed != settings.ramp_feed {
+            ops.push(Op::SetFeed(settings.ramp_feed));
+            feed = settings.ramp_feed;
+        }
+        ops.push(Op::MoveTo(step));
+        done += seg;
+        prev = step;
+    }
+}
+
+/// Round a computed point to the micron.
+///
+/// Two reasons, and either would do. The wire carries three decimals
+/// (`Driver::move_to`) and the machine steps at 0.01 mm (`$100`), so anything
+/// finer is invented. And a full-precision `f64` does not survive
+/// `plan.jsonl`: `1.1094003924504545` comes back from `serde_json` as `…543`,
+/// which is physically nothing and yet enough to make a resumed plan differ
+/// from the one that was saved. Points that come straight from the drawing are
+/// left alone; this is for the ones we compute.
+fn to_micron(p: Point) -> Point {
+    Point::new(
+        (p.x * 1000.0).round() / 1000.0,
+        (p.y * 1000.0).round() / 1000.0,
+    )
 }
 
 /// Push subdivided `MoveTo`s stepping from `from` through each of `points`.
@@ -485,6 +594,74 @@ mod tests {
             assert!((p.x - 10.0).abs() < 1e-9, "drifted off the line: {p:?}");
             assert!(p.y >= 10.0 - 1e-9 && p.y <= 40.0 + 1e-9);
         }
+    }
+
+    /// Feeds only; a stroke long enough for both ramps and a fast middle.
+    fn stroke_feeds(len_mm: f64, settings: &PlanSettings) -> Vec<u32> {
+        let plan = Plan::build(
+            &[vec![Point::new(0.0, 0.0), Point::new(len_mm, 0.0)]],
+            &Placement::identity(),
+            settings,
+        );
+        plan.ops[plan.strokes[0].start_op..]
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetFeed(f) => Some(*f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The ends of a stroke are drawn slowly and the middle is not, and the
+    /// feed changes land *on* the boundary rather than at whatever subdivided
+    /// point happens to be nearest.
+    #[test]
+    fn a_stroke_is_slow_at_both_ends_and_fast_in_the_middle() {
+        let settings = PlanSettings {
+            ramp_mm: 2.0,
+            ramp_feed: 300,
+            draw_feed: 2000,
+            ..PlanSettings::default()
+        };
+        assert_eq!(stroke_feeds(40.0, &settings), vec![300, 2000, 300, 8000]);
+
+        let plan = Plan::build(
+            &[vec![Point::new(0.0, 0.0), Point::new(40.0, 0.0)]],
+            &Placement::identity(),
+            &settings,
+        );
+        let xs: Vec<f64> = plan.ops[plan.strokes[0].start_op..]
+            .iter()
+            .filter_map(|op| match op {
+                Op::MoveTo(p) => Some(p.x),
+                _ => None,
+            })
+            .collect();
+        assert!(xs.contains(&2.0), "no move ends at the lead-in: {xs:?}");
+        assert!(xs.contains(&38.0), "no move ends at the lead-out: {xs:?}");
+    }
+
+    /// A stroke with no room for two ramps is all end, so it goes slowly
+    /// throughout rather than being given a nonsensical middle.
+    #[test]
+    fn a_stroke_shorter_than_two_ramps_is_slow_all_through() {
+        let settings = PlanSettings {
+            ramp_mm: 2.0,
+            ramp_feed: 300,
+            ..PlanSettings::default()
+        };
+        assert_eq!(stroke_feeds(3.0, &settings), vec![300, 8000]);
+    }
+
+    /// Zero turns the ramp off: one feed for the whole stroke, as before.
+    #[test]
+    fn a_zero_ramp_draws_the_whole_stroke_at_the_drawing_feed() {
+        let settings = PlanSettings {
+            ramp_mm: 0.0,
+            draw_feed: 2000,
+            ..PlanSettings::default()
+        };
+        assert_eq!(stroke_feeds(40.0, &settings), vec![2000, 8000]);
     }
 
     #[test]

@@ -74,6 +74,11 @@ pub struct ProfileOverride {
     pub max_feed: Option<u32>,
     /// Longest single plan segment, mm — the stop/resume granularity (§6).
     pub max_segment_mm: Option<f64>,
+    /// How much of each end of a stroke to draw slowly, mm. Zero turns the
+    /// ramp off.
+    pub ramp_mm: Option<f64>,
+    /// Feed for those ends, mm/min — the speed at which the nib leaves no hook.
+    pub ramp_feed: Option<u32>,
     /// Acceleration to *put on the machine*, mm/s² (`$120`/`$121`). Unlike
     /// every other field this one is written back to the board's EEPROM, so
     /// the tuning that stops an A0 gantry bending the end of a stroke lives in
@@ -197,6 +202,8 @@ mod tests {
             jog_feed = 2500
             max_feed = 9000
             max_segment_mm = 2.5
+            ramp_mm = 3.0
+            ramp_feed = 400
             accel_mm_s2 = 500.0
             junction_deviation_mm = 0.002
             "#,
@@ -217,6 +224,8 @@ mod tests {
         assert_eq!(o.jog_feed, Some(2500));
         assert_eq!(o.max_feed, Some(9000));
         assert_eq!(o.max_segment_mm, Some(2.5));
+        assert_eq!(o.ramp_mm, Some(3.0));
+        assert_eq!(o.ramp_feed, Some(400));
         assert_eq!(o.accel_mm_s2, Some(500.0));
         assert_eq!(o.junction_deviation_mm, Some(0.002));
     }

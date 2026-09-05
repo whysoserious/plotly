@@ -594,19 +594,29 @@ impl Driver {
     /// machine.
     pub fn wait_idle(&mut self) -> Result<(), DriverError> {
         let deadline = Instant::now() + DRAIN_TIMEOUT;
+        let mut seen_busy = false;
         let mut streak = 0;
         while Instant::now() < deadline {
             self.connection.transport.write_realtime(b'?')?;
             match self.read_status()? {
                 Some(state) if state == "Idle" => {
                     streak += 1;
-                    if streak >= IDLE_STREAK {
+                    // Having watched the machine run, the first `Idle` is the
+                    // end of that run and there is nothing to be careful
+                    // about. The streak is only needed when we never saw it
+                    // move, where an `Idle` may be the stale one that trails
+                    // `ok` (§15.1). This is what makes the poll fence cheaper
+                    // than the dwell: one poll gap against `G4`'s measured
+                    // 50 ms floor, on every pen move.
+                    if seen_busy || streak >= IDLE_STREAK {
                         return Ok(());
                     }
                 }
-                // Anything else — `Run`, `Hold`, or no answer at all — starts
-                // the count again.
-                _ => streak = 0,
+                Some(_) => {
+                    seen_busy = true;
+                    streak = 0;
+                }
+                None => streak = 0,
             }
             std::thread::sleep(POLL_GAP);
         }

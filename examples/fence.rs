@@ -88,6 +88,30 @@ fn main() -> io::Result<()> {
     probe.send_ok("G21", SHORT_WAIT);
     probe.send_ok("G90", SHORT_WAIT);
 
+    if opts.zladder {
+        stage_zladder(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
+    if opts.ladder {
+        stage_ladder(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
+    if opts.dip {
+        stage_dip(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
     if opts.pen {
         stage_pen(&mut probe, &opts);
         if confirm("\nDisable the motors now (`$SLP`)?") {
@@ -232,6 +256,35 @@ fn report_pen_samples(samples: &[(f64, [f64; 3])], opts: &Options) {
     }
     println!("\n  XY travelled while Z was also moving: {moved_while_landing:.3} mm");
     println!("  time with the tip on the paper and XY still: {still_on_paper:.0} ms");
+    // How long each Z move actually took, and how far it went. The open
+    // question behind every pen-move figure: 4.5 mm took ~240 ms, four times
+    // what F5000 implies, and nobody knows why. If a shorter lift is
+    // proportionally quicker the fix is `pen_up_z`; if the time is flat, it is
+    // a firmware floor and lowering the lift buys nothing.
+    let mut z_runs: Vec<(f64, f64)> = Vec::new();
+    let mut open: Option<(f64, f64)> = None; // (start_ms, start_z)
+    for (a, b) in samples.iter().zip(samples.iter().skip(1)) {
+        let moving = (b.1[2] - a.1[2]).abs() > 0.001;
+        match (open, moving) {
+            (None, true) => open = Some((a.0, a.1[2])),
+            (Some((t0, z0)), false) => {
+                z_runs.push((a.0 - t0, (a.1[2] - z0).abs()));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    let z_runs: Vec<_> = z_runs.into_iter().filter(|(_, mm)| *mm > 0.1).collect();
+    if !z_runs.is_empty() {
+        println!("\n  Z moves seen:");
+        for (ms, mm) in &z_runs {
+            println!(
+                "    {mm:.2} mm in {ms:.0} ms  ({:.1} mm/s, commanded F{})",
+                mm / (ms / 1000.0),
+                opts.z_feed
+            );
+        }
+    }
     if let Some((t, p)) = first_touch {
         println!(
             "  first touch at {t:.0} ms, X{:.3} Y{:.3} Z{:.3}",
@@ -256,6 +309,168 @@ fn mpos(report: &str) -> Option<[f64; 3]> {
     let mut it = field.trim_start_matches("MPos:").split(',');
     let mut next = || it.next()?.trim_end_matches('>').parse::<f64>().ok();
     Some([next()?, next()?, next()?])
+}
+
+/// Dip the pen straight down and straight up, several times, with *no XY
+/// motion while it is down*.
+///
+/// The decisive test for a mechanism that does not lift the pen vertically.
+/// Every dip is commanded as a pure Z move between two standstills, so if the
+/// paper shows anything but a round dot — a comma, a tick, a hook — the tip
+/// travelled sideways without being told to, and no host-side setting will
+/// ever fix that. It also rules ink pooling in or out on the same sheet: the
+/// dips hold different dwell times, so a dot that grows with the dwell is ink,
+/// and one that does not is geometry.
+fn stage_dip(probe: &mut Probe, opts: &Options) {
+    println!("\n---- does the pen move sideways on its own? ----");
+    println!("Six dips in a row, 8 mm apart, each a pure Z move with the machine");
+    println!("at a standstill. Dwell on the paper: 0, 0.1, 0.2, 0.5, 1.0, 2.0 s.");
+    println!("\nRead it like this:");
+    println!("  round dots, all alike        -> the lift is vertical; the hook is elsewhere");
+    println!("  commas / ticks / hooks       -> the mechanism moves the tip sideways");
+    println!("  dots growing with the dwell  -> ink pooling, not motion");
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    for (i, dwell) in [0.0, 0.1, 0.2, 0.5, 1.0, 2.0].iter().enumerate() {
+        // Get there with the pen up, and stop before touching anything.
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        if i > 0 {
+            probe.send_ok(&format!("G1 G91 X8 F{}", opts.feed), SHORT_WAIT);
+        }
+        probe.wait_idle(LONG_WAIT);
+
+        // Down, wait, up. Nothing else. Any XY on the paper is the machine's
+        // own doing.
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_down_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        if *dwell > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(*dwell));
+        }
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        println!("  dip {} done (dwell {dwell:.1} s)", i + 1);
+    }
+    // Back to where it started, so the sheet can be compared with another run.
+    probe.send_ok(&format!("G1 G91 X-40 F{}", opts.feed), SHORT_WAIT);
+    probe.wait_idle(LONG_WAIT);
+    println!("\n  Look at the six marks left to right.");
+}
+
+/// Draw the same stroke at a ladder of feed rates, all on one sheet.
+///
+/// The hook turned out to be drawing speed: a tube nib dragged at 33 mm/s
+/// deflects, and the deflection unloads when the machine stops in 11 ms
+/// (§2.12). `draw_feed = 300` makes it microscopic, but 300 is a crawl, so the
+/// production question is where the line between the two lies.
+///
+/// Answering it with one print per feed is the comparison that has misled this
+/// investigation five times over (§2.9a): different sheets, different sittings,
+/// an artefact near the threshold of visibility. One sheet, same pen, same ink,
+/// same minute, and the eye only has to say which row is the last clean one.
+fn stage_ladder(probe: &mut Probe, opts: &Options) {
+    // Deliberately far past anything a plot would use. If the hook is the nib
+    // deflecting at speed, F12000 (200 mm/s, the machine's own `$111` limit)
+    // must make it enormous — and if it looks the same as the F300 row, speed
+    // is not the cause and the whole idea dies here. A test worth running is
+    // one whose outcome is unambiguous either way.
+    const FEEDS: [u32; 6] = [300, 1000, 2000, 4000, 8000, 12000];
+    println!("\n---- how fast can it draw and stay clean? ----");
+    println!("Six strokes of {} mm, 5 mm apart, top to bottom:", opts.mm);
+    for (i, feed) in FEEDS.iter().enumerate() {
+        println!("  row {}  F{feed}", i + 1);
+    }
+    println!("\nPick the last row whose ends are clean; that is your draw_feed.");
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    probe.send_ok(
+        &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+        SHORT_WAIT,
+    );
+    for (i, feed) in FEEDS.iter().enumerate() {
+        if i > 0 {
+            // Back to the left edge and down a row, pen up.
+            probe.send_ok(&format!("G1 G91 X-{} F{}", opts.mm, opts.feed), SHORT_WAIT);
+            probe.send_ok(&format!("G1 G91 Y-5 F{}", opts.feed), SHORT_WAIT);
+            probe.wait_idle(LONG_WAIT);
+        }
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_down_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(&format!("G1 G91 X{} F{feed}", opts.mm), SHORT_WAIT);
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        println!("  row {} drawn at F{feed}", i + 1);
+    }
+    println!("\n  Six rows, F300 at the top down to F2000 at the bottom.");
+}
+
+/// Draw the same stroke at a ladder of pen-down heights, all on one sheet.
+///
+/// The one pen-side variable never tried. `--dip` proved the dots are ink
+/// pooling and that they grow with time on the paper (§2.9a), so pressure is a
+/// live suspect for a mark that smears in the direction of the first movement —
+/// which is what a hook at the *start* of a stroke would be. Heavier pressure
+/// floods more ink; lighter eventually starves the line.
+fn stage_zladder(probe: &mut Probe, opts: &Options) {
+    let heights: Vec<f32> = (0..6)
+        .map(|i| opts.pen_down_z - i as f32 * opts.z_step)
+        .collect();
+    println!("\n---- how hard should the pen press? ----");
+    println!("Six strokes of {} mm, 5 mm apart, top to bottom:", opts.mm);
+    for (i, z) in heights.iter().enumerate() {
+        println!("  row {}  Z{z:.1}", i + 1);
+    }
+    println!(
+        "\nLighter as you go down, {:.2} mm a step. Take the lightest row that",
+        opts.z_step
+    );
+    println!("still draws a solid line — then back off one, because the gap between");
+    println!("'draws' and 'does not touch' is the margin the paper's own flatness eats.");
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    probe.send_ok(
+        &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+        SHORT_WAIT,
+    );
+    for (i, z) in heights.iter().enumerate() {
+        if i > 0 {
+            probe.send_ok(&format!("G1 G91 X-{} F{}", opts.mm, opts.feed), SHORT_WAIT);
+            probe.send_ok(&format!("G1 G91 Y-5 F{}", opts.feed), SHORT_WAIT);
+            probe.wait_idle(LONG_WAIT);
+        }
+        probe.send_ok(&format!("G1 G90 Z{z:.3} F{}", opts.z_feed), SHORT_WAIT);
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(&format!("G1 G91 X{} F{}", opts.mm, opts.feed), SHORT_WAIT);
+        probe.wait_idle(LONG_WAIT);
+        probe.send_ok(
+            &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        println!("  row {} drawn at Z{z:.1}", i + 1);
+    }
+    println!("\n  Six rows, heaviest at the top.");
 }
 
 /// Which barrier is under test.
@@ -479,6 +694,14 @@ struct Options {
     feed: u32,
     /// Run the axis-sampling stage instead of the barrier comparison.
     pen: bool,
+    /// Run the pure-Z dip stage.
+    dip: bool,
+    /// Run the feed-ladder stage.
+    ladder: bool,
+    /// Run the pen-pressure-ladder stage.
+    zladder: bool,
+    /// Step between rows of the pressure ladder, mm.
+    z_step: f32,
     pen_up_z: f32,
     pen_down_z: f32,
     z_feed: u32,
@@ -492,6 +715,10 @@ impl Options {
             mm: 40,
             feed: 600,
             pen: false,
+            dip: false,
+            ladder: false,
+            zladder: false,
+            z_step: 0.2,
             pen_up_z: 0.5,
             pen_down_z: 5.0,
             z_feed: 5000,
@@ -514,6 +741,10 @@ impl Options {
                     return Ok(None);
                 }
                 "--pen" => opts.pen = true,
+                "--dip" => opts.dip = true,
+                "--ladder" => opts.ladder = true,
+                "--zladder" => opts.zladder = true,
+                "--z-step" => opts.z_step = number(args.next(), "--z-step")? as f32 / 1000.0,
                 "--pen-up-z" => opts.pen_up_z = number(args.next(), "--pen-up-z")? as f32 / 1000.0,
                 "--pen-down-z" => {
                     opts.pen_down_z = number(args.next(), "--pen-down-z")? as f32 / 1000.0
@@ -547,6 +778,10 @@ fn print_usage() {
          Options:\n  \
          --port <path>   serial port (default: the first iDraw found)\n  \
          --baud <n>      baud rate (default: {DEFAULT_BAUD})\n  \
+         --ladder        draw the same stroke at F300..F12000, one sheet\n  \
+         --zladder       draw it at six pen-down heights, one sheet\n  \
+         --z-step <n>    step between those heights, thousandths of a mm (default: 200)\n  \
+         --dip           dip the pen straight down and up, no XY: does it mark sideways?\n  \
          --pen           sample the axes through a real pen-down / draw / pen-up\n  \
          --pen-up-z <n>  pen-up Z in thousandths of a mm (default: 500 = 0.5)\n  \
          --pen-down-z <n>  pen-down Z, thousandths of a mm (default: 5000 = 5.0)\n  \
