@@ -162,6 +162,7 @@ impl Profile {
             max_segment_mm,
             ramp_mm,
             ramp_feed,
+            ramp_angle_deg,
             accel_mm_s2,
             junction_deviation_mm,
         } = *over;
@@ -188,6 +189,7 @@ impl Profile {
         set(&mut self.plan.max_segment_mm, max_segment_mm);
         set(&mut self.plan.ramp_mm, ramp_mm.map(|mm| mm.max(0.0)));
         set(&mut self.plan.ramp_feed, ramp_feed);
+        set(&mut self.plan.ramp_angle_deg, ramp_angle_deg);
         set(&mut self.accel_mm_s2, accel_mm_s2);
         set(&mut self.junction_deviation_mm, junction_deviation_mm);
     }

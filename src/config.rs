@@ -79,6 +79,8 @@ pub struct ProfileOverride {
     pub ramp_mm: Option<f64>,
     /// Feed for those ends, mm/min — the speed at which the nib leaves no hook.
     pub ramp_feed: Option<u32>,
+    /// How sharp a corner has to be, in degrees, to get a ramp of its own.
+    pub ramp_angle_deg: Option<f64>,
     /// Acceleration to *put on the machine*, mm/s² (`$120`/`$121`). Unlike
     /// every other field this one is written back to the board's EEPROM, so
     /// the tuning that stops an A0 gantry bending the end of a stroke lives in
@@ -204,6 +206,7 @@ mod tests {
             max_segment_mm = 2.5
             ramp_mm = 3.0
             ramp_feed = 400
+            ramp_angle_deg = 35.0
             accel_mm_s2 = 500.0
             junction_deviation_mm = 0.002
             "#,
@@ -226,8 +229,107 @@ mod tests {
         assert_eq!(o.max_segment_mm, Some(2.5));
         assert_eq!(o.ramp_mm, Some(3.0));
         assert_eq!(o.ramp_feed, Some(400));
+        assert_eq!(o.ramp_angle_deg, Some(35.0));
         assert_eq!(o.accel_mm_s2, Some(500.0));
         assert_eq!(o.junction_deviation_mm, Some(0.002));
+    }
+
+    /// `default.conf` is the documentation for this struct, so it has to stay
+    /// level with it. Parsing under `deny_unknown_fields` catches a key that no
+    /// longer exists; requiring every field to be set catches the commoner
+    /// drift, which is a new option nobody wrote down.
+    #[test]
+    fn the_annotated_defaults_document_every_option() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("default.conf");
+        let text = std::fs::read_to_string(&path).expect("default.conf is in the repo root");
+        let config: Config = toml::from_str(&text).expect("default.conf parses");
+        let over = config.overrides_for("idraw-a0");
+
+        // Destructured rather than checked field by field, so adding an option
+        // to ProfileOverride fails to compile here until it is listed.
+        let ProfileOverride {
+            width_mm,
+            height_mm,
+            pen_up_z,
+            pen_down_z,
+            pen_z_feed,
+            pen_settle_up_secs,
+            pen_settle_down_secs,
+            pen_fence,
+            draw_feed,
+            travel_feed,
+            jog_feed,
+            max_feed,
+            max_segment_mm,
+            ramp_mm,
+            ramp_feed,
+            ramp_angle_deg,
+            accel_mm_s2,
+            junction_deviation_mm,
+        } = over;
+        let documented = [
+            ("width_mm", width_mm.is_some()),
+            ("height_mm", height_mm.is_some()),
+            ("pen_up_z", pen_up_z.is_some()),
+            ("pen_down_z", pen_down_z.is_some()),
+            ("pen_z_feed", pen_z_feed.is_some()),
+            ("pen_settle_up_secs", pen_settle_up_secs.is_some()),
+            ("pen_settle_down_secs", pen_settle_down_secs.is_some()),
+            ("pen_fence", pen_fence.is_some()),
+            ("draw_feed", draw_feed.is_some()),
+            ("travel_feed", travel_feed.is_some()),
+            ("jog_feed", jog_feed.is_some()),
+            ("max_feed", max_feed.is_some()),
+            ("max_segment_mm", max_segment_mm.is_some()),
+            ("ramp_mm", ramp_mm.is_some()),
+            ("ramp_feed", ramp_feed.is_some()),
+            ("ramp_angle_deg", ramp_angle_deg.is_some()),
+            ("accel_mm_s2", accel_mm_s2.is_some()),
+            ("junction_deviation_mm", junction_deviation_mm.is_some()),
+        ];
+        let missing: Vec<&str> = documented
+            .iter()
+            .filter(|(_, set)| !set)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(missing.is_empty(), "not in default.conf: {missing:?}");
+    }
+
+    /// The documented values must be the ones the program actually starts
+    /// with, or the file is a plausible-looking lie.
+    #[test]
+    fn the_annotated_defaults_match_the_built_in_profile() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("default.conf");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let config: Config = toml::from_str(&text).unwrap();
+        let documented = config.overrides_for("idraw-a0");
+
+        let built_in = crate::profiles::Profile::builtin("idraw-a0").unwrap();
+        assert_eq!(documented.width_mm, Some(built_in.field.width_mm));
+        assert_eq!(documented.height_mm, Some(built_in.field.height_mm));
+        assert_eq!(documented.pen_up_z, Some(built_in.pen.up_z));
+        assert_eq!(documented.pen_down_z, Some(built_in.pen.down_z));
+        assert_eq!(documented.pen_z_feed, Some(built_in.pen.z_feed));
+        assert_eq!(documented.pen_fence, Some(built_in.pen.fence));
+        assert_eq!(documented.draw_feed, Some(built_in.plan.draw_feed));
+        assert_eq!(documented.travel_feed, Some(built_in.plan.travel_feed));
+        assert_eq!(documented.jog_feed, Some(built_in.jog_feed));
+        assert_eq!(documented.max_feed, Some(built_in.max_feed));
+        assert_eq!(documented.ramp_mm, Some(built_in.plan.ramp_mm));
+        assert_eq!(documented.ramp_feed, Some(built_in.plan.ramp_feed));
+        assert_eq!(
+            documented.ramp_angle_deg,
+            Some(built_in.plan.ramp_angle_deg)
+        );
+        assert_eq!(
+            documented.max_segment_mm,
+            Some(built_in.plan.max_segment_mm)
+        );
+        assert_eq!(documented.accel_mm_s2, Some(built_in.accel_mm_s2));
+        assert_eq!(
+            documented.junction_deviation_mm,
+            Some(built_in.junction_deviation_mm)
+        );
     }
 
     /// A typo must not be swallowed: the user believes the setting is live.

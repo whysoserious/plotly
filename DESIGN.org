@@ -746,6 +746,13 @@ pull-off ~$27 = 1~ mm. *To jest profil bazowy* — reszta tabeli zostaje dla inn
 w *TOML*; wymiary i limity *auto-odczytujemy z ~$$~* (~$130/$131~, ~$110/$111~, ~$120/$121~)
 i traktujemy plik profilu jako override. Rozmiary AxiDraw — tylko jako referencja, gdyby kiedyś.
 
+*Pełna, opisana konfiguracja domyślna: ~default.conf~ w korzeniu repo.* Nie jest czytana przez
+program — jest dokumentacją ~ProfileOverride~: każde pole z wartością wbudowaną, jednostką,
+i tym, *dlaczego* istnieje oraz co zmierzono. Kopiuje się z niej linijki do
+~~/.config/plotly/config.toml~. Dwa testy pilnują, żeby nie skłamała: jeden wymaga, by
+*każde* pole ~ProfileOverride~ było w niej wymienione (nowa opcja bez opisu nie kompiluje
+testu), drugi porównuje zapisane wartości z wbudowanym profilem.
+
 ** Jak profil powstaje (implementacja, krok 5.1)
 ~profiles.rs~ + ~config.rs~. Trzy źródła, w tej kolejności:
 1. *Wbudowany profil* — tabela modeli wyżej (~MODELS~), domyślnie ~idraw-a0~ (nasze
