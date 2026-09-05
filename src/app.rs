@@ -38,6 +38,18 @@ const STOP_TIMER_MINUTES: [u64; 3] = [1, 5, 15];
 /// lifts the pen once that much travel is done.
 const STOP_DISTANCE_MM: [f64; 3] = [500.0, 1000.0, 5000.0];
 
+/// How much `,` / `.` change the pen-down height, mm.
+///
+/// Fine, because the useful band is narrow: on our machine the lightest height
+/// that still draws was 0.2 mm above the one that stopped touching at all
+/// (§2.5), and that whole band is what separates a clean line from ink flooding
+/// at the point of contact.
+pub const PEN_Z_STEP_MM: f32 = 0.05;
+
+/// How far the pen may be driven, mm. `$132` says 10 on our machine; the pen
+/// cannot usefully go above the homed top either, so both ends are held.
+const PEN_Z_RANGE: std::ops::RangeInclusive<f32> = 0.0..=10.0;
+
 /// Outcome of a key press while the resume prompt is up.
 enum ResumeReply {
     /// The prompt consumed the key (Enter/n/Esc or a release).
@@ -349,6 +361,8 @@ impl App {
             Action::PenUp => self.worker.send(Command::PenUp),
             Action::PenDown => self.worker.send(Command::PenDown),
             Action::PenToggle => self.worker.send(Command::PenToggle),
+            Action::PenDeeper => self.nudge_pen_depth(PEN_Z_STEP_MM),
+            Action::PenShallower => self.nudge_pen_depth(-PEN_Z_STEP_MM),
             Action::Home => self.worker.send(Command::Home),
             Action::DisableMotors => self.worker.send(Command::DisableMotors),
             Action::Pause => self.worker.send(Command::Pause),
@@ -705,6 +719,45 @@ impl App {
         self.pausing
     }
 
+    /// Press the pen harder (positive) or more lightly, and say where it ended
+    /// up — the number is only useful if the operator can copy it into
+    /// `config.toml` afterwards, so it goes on screen and into the log.
+    ///
+    /// Held-key repeats are folded into one command, exactly as jogging does.
+    /// Without that, a second of auto-repeat is 25 key events, and with the pen
+    /// down each of them is a 240 ms Z move (§2.6) — six seconds of backlog per
+    /// second of holding, behind which every later key, `space` included, sits
+    /// and waits.
+    fn nudge_pen_depth(&mut self, delta_mm: f32) {
+        let mut steps = delta_mm;
+        while matches!(event::poll(Duration::ZERO), Ok(true)) {
+            let Ok(event) = event::read() else { break };
+            match pen_depth_of(&event) {
+                Some(delta) => steps += delta,
+                None => {
+                    self.pending_events.push_back(event);
+                    break;
+                }
+            }
+        }
+        let wanted = self.profile.pen.down_z + steps;
+        // Clamp rather than refuse: a coalesced burst can overshoot the end of
+        // the range, and stopping at the limit is what the operator means.
+        let wanted = wanted.clamp(*PEN_Z_RANGE.start(), *PEN_Z_RANGE.end());
+        if wanted == self.profile.pen.down_z {
+            self.note = Some(format!("pen Z stays at {wanted:.2}"));
+            return;
+        }
+        self.profile.pen.down_z = wanted;
+        self.worker.send(Command::SetPenDownZ(wanted));
+        self.note = Some(format!("pen_down_z = {wanted:.2}"));
+    }
+
+    /// The pen-down height in force, for the status bar.
+    pub fn pen_down_z(&self) -> f32 {
+        self.profile.pen.down_z
+    }
+
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
     }
@@ -722,6 +775,23 @@ impl App {
 /// The jog delta of an event, if it is a navigation-mode jog key press. Key
 /// releases (which some terminals emit) are ignored here so they neither add to
 /// the sum nor stop coalescing.
+/// The pen-depth change an event asks for, or `None` if it is a boundary that
+/// must not be folded into the current one. Sibling of [`jog_of`].
+fn pen_depth_of(event: &TermEvent) -> Option<f32> {
+    let TermEvent::Key(key) = event else {
+        return None;
+    };
+    if key.kind == KeyEventKind::Release {
+        // Not a boundary: skip it, as a zero-sized step.
+        return Some(0.0);
+    }
+    match action_for(Mode::Navigation, key) {
+        Some(Action::PenDeeper) => Some(PEN_Z_STEP_MM),
+        Some(Action::PenShallower) => Some(-PEN_Z_STEP_MM),
+        _ => None,
+    }
+}
+
 fn jog_of(event: &TermEvent) -> Option<(i8, i8)> {
     let TermEvent::Key(key) = event else {
         return None;
@@ -812,6 +882,30 @@ mod tests {
     }
 
     /// An app with a small drawing loaded and the head parked at the origin.
+    /// The band that matters is narrow and the keys are meant to be held, so
+    /// the ends of the range have to hold rather than wrap or run off into a Z
+    /// the machine cannot reach.
+    #[test]
+    fn the_pen_depth_stops_at_the_ends_of_its_range() {
+        let mut app = app_with_a_drawing();
+        for _ in 0..500 {
+            app.nudge_pen_depth(PEN_Z_STEP_MM);
+        }
+        assert!(
+            PEN_Z_RANGE.contains(&app.pen_down_z()),
+            "ran past the top: {}",
+            app.pen_down_z()
+        );
+        for _ in 0..500 {
+            app.nudge_pen_depth(-PEN_Z_STEP_MM);
+        }
+        assert!(
+            PEN_Z_RANGE.contains(&app.pen_down_z()),
+            "ran past the bottom: {}",
+            app.pen_down_z()
+        );
+    }
+
     fn app_with_a_drawing() -> App {
         let driver = Driver::new(Connection {
             transport: Box::new(MockTransport::new()),

@@ -24,6 +24,10 @@ pub enum Action {
     PenUp,
     PenDown,
     PenToggle,
+    /// Press the pen harder or more lightly, in steps of
+    /// [`crate::app::PEN_Z_STEP_MM`].
+    PenDeeper,
+    PenShallower,
     Home,
     DisableMotors,
     /// Jog by the current step in a logical direction (right = +X, up = up the
@@ -128,6 +132,18 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         probe: Some(KeyCode::Char(']')),
         action: Action::PenDown,
         description: "pen down",
+    },
+    Binding {
+        keys: ".",
+        probe: Some(KeyCode::Char('.')),
+        action: Action::PenDeeper,
+        description: "press the pen harder (Z down 0.05)",
+    },
+    Binding {
+        keys: ",",
+        probe: Some(KeyCode::Char(',')),
+        action: Action::PenShallower,
+        description: "press the pen lighter (Z up 0.05)",
     },
     Binding {
         keys: "space",
@@ -243,6 +259,9 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('[') | KeyCode::PageUp => Some(Action::PenUp),
         KeyCode::Char(']') | KeyCode::PageDown => Some(Action::PenDown),
         KeyCode::Char(' ') => Some(Action::PenToggle),
+        // `.` and `,` carry `>` and `<`: deeper and shallower.
+        KeyCode::Char('.') => Some(Action::PenDeeper),
+        KeyCode::Char(',') => Some(Action::PenShallower),
         KeyCode::Right => Some(Action::Jog { dx: 1, dy: 0 }),
         KeyCode::Left => Some(Action::Jog { dx: -1, dy: 0 }),
         // Up-arrow is "up the page": logical -Y in the SVG frame (§2.3).
@@ -423,6 +442,8 @@ mod tests {
             Action::OpenConsole,
             Action::ToggleHelp,
             Action::Quit,
+            Action::PenDeeper,
+            Action::PenShallower,
         ] {
             assert!(
                 documented.contains(&action),

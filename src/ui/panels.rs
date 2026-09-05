@@ -16,8 +16,9 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     let machine = app.machine();
     let activity = match app.activity() {
         Activity::Idle => format!(
-            "pen {}, jog {} mm{}",
+            "pen {} @ Z{:.2}, jog {} mm{}",
             machine.pen,
+            app.pen_down_z(),
             app.jog_step_mm(),
             // What the loaded drawing will cost, before committing paper to it.
             match app.estimate() {

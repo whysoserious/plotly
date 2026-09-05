@@ -23,6 +23,8 @@ pub enum Command {
     PenUp,
     PenDown,
     PenToggle,
+    /// Change how deep the pen goes, in machine Z (§2.5). Larger is *lower*.
+    SetPenDownZ(f32),
     Home,
     DisableMotors,
     /// Jog by a logical delta in mm (right = +X, up the page = +Y).
@@ -218,6 +220,7 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
 /// Execute a single non-plan command, reporting a failure as an event.
 fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
     let (label, result): (&str, Result<(), DriverError>) = match command {
+        Command::SetPenDownZ(z) => ("pen depth", driver.set_pen_down_z(z)),
         Command::PenUp => ("pen up", driver.pen_up()),
         Command::PenDown => ("pen down", driver.pen_down()),
         Command::PenToggle => ("pen", driver.toggle_pen()),

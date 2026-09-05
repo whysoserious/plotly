@@ -597,6 +597,7 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~o~ | ~~set origin~~ — *niepotrzebne*: originem jest pozycja głowicy przy ~Enter~ (2.4 pkt C) |
 | ~f~ | frame — obrysuj bbox *rysowanej* geometrii z podniesionym piórem (5.3) |
 | ~g~ | go-to XY (wpisz współrzędne) |
+| ~.~ / ~,~ | docisk pióra: ~pen_down_z~ ±0,05 mm *na żywo* (2.5) — jeśli pióro jest na dole, siada od razu na nowej wysokości; wartość w pasku statusu i w logu, do przepisania do ~config.toml~ |
 | ~Esc~ | pause — *kooperatywna, na granicy kształtu* (nie feed-hold; sekcja 9) |
 | ~r~ | resume; wciśnięte *przed* wejściem pauzy — odwołuje ją |
 | ~S~ | *STOP* planu + pen up (kooperatywnie między op) |

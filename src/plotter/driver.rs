@@ -334,6 +334,23 @@ impl Driver {
         }
     }
 
+    /// Set the pen-down height and, if the pen is already down, land again at
+    /// the new one so the change can be seen on the paper immediately.
+    ///
+    /// This is the number that decides how hard a tube nib presses, and getting
+    /// it wrong floods ink at the point of contact (§2.5). It is worth a key
+    /// rather than a config file and a restart: the only way to judge it is to
+    /// watch a line being drawn.
+    pub fn set_pen_down_z(&mut self, z: f32) -> Result<(), DriverError> {
+        self.settings.down_z = z;
+        tracing::info!(pen_down_z = z, "pen-down height changed");
+        if self.pen == Pen::Down {
+            self.move_pen_now(Pen::Down)?;
+            self.command(&format!("G1 F{}", self.settings.xy_feed))?;
+        }
+        Ok(())
+    }
+
     /// Run a homing cycle (`$H`).
     ///
     /// This blocks until the machine reports `ok`, which for `$H` means the
