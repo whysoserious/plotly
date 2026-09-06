@@ -84,6 +84,20 @@ pub struct MachineState {
     pub position: Point,
 }
 
+/// Why a plan ended before its last op. The operator reads the reason on
+/// screen, and a cutoff that fired is one the app then disarms: an armed
+/// cutoff re-arms itself on every start, so without this a forgotten `t`/`m`
+/// stops every restart at the same distance and looks like a machine fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCause {
+    /// Asked for: `Stop`, the panic stop, a shutdown, or an op that failed.
+    Asked,
+    /// The armed safety timer ran out (§9).
+    Timer,
+    /// The armed distance cutoff spent its travel budget (§9).
+    Distance,
+}
+
 /// Something the worker wants the app to know.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -111,8 +125,9 @@ pub enum Event {
     /// Wall time across a pause is not the plot's time; it is however long the
     /// operator was away.
     PlanDone { elapsed_secs: f64 },
-    /// The plan was stopped or aborted before the end.
-    Aborted,
+    /// The plan was stopped or aborted before the end; `StopCause` says by
+    /// what, so the status bar can name it rather than just say "stopped".
+    Aborted(StopCause),
     /// A command failed. Also logged; surfaced so the UI can flag it.
     Error(String),
 }
@@ -367,14 +382,14 @@ fn run_plan(
         // Either cutoff only has to fire by the next boundary once it is due.
         if let Some(pen_up) = cutoff_fired(cutoff, Instant::now()) {
             tracing::info!(done = index, pen_up, "timed stop");
-            stop_plan(driver, events, pen_up);
+            stop_plan(driver, events, pen_up, StopCause::Timer);
             checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(());
         }
         if let Some((budget, pen_up)) = distance_cutoff {
             if distance_mm >= budget {
                 tracing::info!(done = index, distance_mm, pen_up, "distance stop");
-                stop_plan(driver, events, pen_up);
+                stop_plan(driver, events, pen_up, StopCause::Distance);
                 checkpoint(progress, index, total, driver);
                 return ControlFlow::Continue(());
             }
@@ -642,7 +657,7 @@ fn emergency_stop(driver: &mut Driver, events: &Sender<Event>) {
     if let Err(err) = driver.emergency_stop() {
         tracing::warn!(%err, "emergency stop failed");
     }
-    emit(events, Event::Aborted);
+    emit(events, Event::Aborted(StopCause::Asked));
     emit(events, Event::State(snapshot(driver)));
 }
 
@@ -651,20 +666,20 @@ fn cutoff_fired(cutoff: Option<(Instant, bool)>, now: Instant) -> Option<bool> {
     cutoff.and_then(|(deadline, pen_up)| (now >= deadline).then_some(pen_up))
 }
 
-/// Stop the plan, lifting the pen only if asked, and report it.
-fn stop_plan(driver: &mut Driver, events: &Sender<Event>, pen_up: bool) {
+/// Stop the plan, lifting the pen only if asked, and report it with the reason.
+fn stop_plan(driver: &mut Driver, events: &Sender<Event>, pen_up: bool, cause: StopCause) {
     if pen_up {
         if let Err(err) = driver.pen_up() {
             tracing::warn!(%err, "pen up during stop failed");
         }
     }
-    emit(events, Event::Aborted);
+    emit(events, Event::Aborted(cause));
     emit(events, Event::State(snapshot(driver)));
 }
 
 /// Lift the pen and report the abort, best-effort.
 fn abort(driver: &mut Driver, events: &Sender<Event>) {
-    stop_plan(driver, events, true);
+    stop_plan(driver, events, true, StopCause::Asked);
 }
 
 /// Translate one plan op into a driver call.

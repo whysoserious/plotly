@@ -11,7 +11,7 @@ use plotly::geometry::{Placement, Point, Transform};
 use plotly::plan::{Op, Plan, PlanSettings};
 use plotly::plotter::driver::Driver;
 use plotly::plotter::mock::MockTransport;
-use plotly::plotter::worker::{Command, Event, Worker};
+use plotly::plotter::worker::{Command, Event, StopCause, Worker};
 use plotly::plotter::Connection;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -64,7 +64,7 @@ fn wait_for_end(worker: &Worker) -> (Option<Event>, usize) {
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         match event {
             Event::Progress { done, .. } => last_done = done,
-            Event::PlanDone { .. } | Event::Aborted => return (Some(event), last_done),
+            Event::PlanDone { .. } | Event::Aborted(_) => return (Some(event), last_done),
             _ => {}
         }
     }
@@ -85,7 +85,10 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
     worker.send(Command::Stop);
 
     let (end, done) = wait_for_end(&worker);
-    assert!(matches!(end, Some(Event::Aborted)), "expected Aborted");
+    assert!(
+        matches!(end, Some(Event::Aborted(StopCause::Asked))),
+        "a stop asked for must not read as a cutoff: {end:?}"
+    );
     assert!(
         done < total,
         "stopped after {done} of {total} ops (not all)"
@@ -258,7 +261,7 @@ fn resume_before_the_shape_ends_calls_the_pause_off() {
                 finished = true;
                 break;
             }
-            Event::Aborted => break,
+            Event::Aborted(_) => break,
             _ => {}
         }
     }
@@ -281,7 +284,7 @@ fn panic_stop_aborts_with_a_soft_reset() {
     worker.send(Command::EmergencyStop);
 
     let (end, _done) = wait_for_end(&worker);
-    assert!(matches!(end, Some(Event::Aborted)), "expected Aborted");
+    assert!(matches!(end, Some(Event::Aborted(_))), "expected Aborted");
 
     worker.shutdown();
 
@@ -310,7 +313,10 @@ fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
     });
 
     let (end, done) = wait_for_end(&worker);
-    assert!(matches!(end, Some(Event::Aborted)), "expected a timed stop");
+    assert!(
+        matches!(end, Some(Event::Aborted(StopCause::Timer))),
+        "the stop has to name the timer, or the status bar cannot: {end:?}"
+    );
     assert!(done < total, "stopped after {done} of {total} ops");
 
     worker.shutdown();
@@ -337,7 +343,7 @@ fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
     });
 
     let (end, _done) = wait_for_end(&worker);
-    assert!(matches!(end, Some(Event::Aborted)));
+    assert!(matches!(end, Some(Event::Aborted(_))));
 
     // Count pen-up Z moves before shutdown; the exit $SLP is separate.
     let pen_ups = sent
@@ -370,8 +376,8 @@ fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
 
     let (end, done) = wait_for_end(&worker);
     assert!(
-        matches!(end, Some(Event::Aborted)),
-        "expected a distance stop"
+        matches!(end, Some(Event::Aborted(StopCause::Distance))),
+        "the stop has to name the cutoff, or the status bar cannot: {end:?}"
     );
     assert!(done < total, "stopped after {done} of {total} ops");
 

@@ -283,7 +283,7 @@ fn a_stopped_plan_leaves_an_unfinished_checkpoint_to_resume_from() {
     worker.send(Command::Stop);
 
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::Aborted) {
+        if matches!(event, Event::Aborted(_)) {
             break;
         }
     }

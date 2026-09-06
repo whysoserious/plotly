@@ -720,6 +720,19 @@ Wstrzymanie *nie* jest realtime i celowo *nie* hamuje w połowie kreski:
 - ~!~/=~= *nie są już używane* (usunięte z ~driver.rs~); fakty o nich zostają w 15.1 na wypadek,
   gdyby kiedyś potrzebne było twarde zatrzymanie w ruchu.
 
+*Cutoff, który wystrzelił, rozbraja się sam i mówi, co zrobił (2026-09-05).*
+Wydruk ~output.svg~ zatrzymywał się „bez powodu" po ~20 s (291 z 81183 op, 502 mm) — i tak samo
+po każdym restarcie. Sprawcą był *nasz własny* dystansowy cutoff: klawisz, który zamknął pytanie
+o wznowienie, leci dalej do normalnej obsługi (§3.3), a tym klawiszem było ~m~ — czyli
+„distance stop: 50 cm". Log to pokazuje co do milisekundy: ~resume dismissed by another key~
+i ~distance cutoff armed mm=500~ mają ten sam stempel ~20:41:19.848~.
+Trzy rzeczy, które to ukryły, i co je zastąpiło:
+| status mówił tylko ~stopped~ | ~Event::Aborted~ niesie ~StopCause~; nota brzmi „stopped by the 500mm (50.0cm) distance cutoff (m: off)" |
+| cutoff zostawał uzbrojony i *uzbraja się na każdym ~enter~* | ten, który wystrzelił, jest zużyty — app go rozbraja (ręczny ~Stop~ nie rusza żadnego) |
+| klawisz zamykający prompt szedł do logu na ~debug~ | idzie na ~info~ *z nazwą klawisza* — bo ten klawisz zaraz coś zrobi |
+Fall-through z §3.3 *zostaje* (nie blokujemy sterowania maszyną za nieodpowiedzianym promptem);
+zmienia się to, że jego skutek widać na ekranie i w logu.
+
 * 10. Profile maszyn (iDraw)
 Pole robocze (komplet z ~idraw2_0_conf.py~, ~model~ 1–4 + warianty travel):
 

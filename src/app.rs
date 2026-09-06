@@ -17,7 +17,7 @@ use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::estimate::{self, Estimate};
 use crate::plan::{Plan, Shape};
-use crate::plotter::worker::{Command, Event, MachineState, Worker};
+use crate::plotter::worker::{Command, Event, MachineState, StopCause, Worker};
 use crate::profiles::Profile;
 use crate::{tui, ui};
 
@@ -269,9 +269,10 @@ impl App {
                     // status bar — so the note keeps the number on screen.
                     self.note = Some(format!("done in {}", ui::fmt_time(elapsed_secs)));
                 }
-                Event::Aborted => {
+                Event::Aborted(cause) => {
                     self.pausing = false;
-                    self.note = Some("stopped".to_owned());
+                    self.note = Some(self.stop_note(cause));
+                    self.disarm(cause);
                 }
                 Event::Error(err) => self.note = Some(format!("error: {err}")),
             }
@@ -429,7 +430,10 @@ impl App {
                 ResumeReply::Handled
             }
             _ => {
-                tracing::info!("resume dismissed by another key; starting fresh");
+                // Info, not debug: this key is about to act as well (the
+                // fall-through in `on_key`), so if it armed a cutoff or moved
+                // the head, the log has to say what was pressed.
+                tracing::info!(key = ?key.code, "resume dismissed by another key; starting fresh");
                 self.resume = None;
                 ResumeReply::Dismissed
             }
@@ -627,6 +631,38 @@ impl App {
     /// The armed distance cutoff in mm, if any.
     pub fn stop_distance_mm(&self) -> Option<f64> {
         self.stop_distance.map(|i| STOP_DISTANCE_MM[i])
+    }
+
+    /// What to put on screen when a plan ends early. A cutoff names itself and
+    /// the key that turns it off: "stopped" alone sends the operator looking at
+    /// the machine for something the app did on purpose.
+    fn stop_note(&self, cause: StopCause) -> String {
+        match cause {
+            StopCause::Asked => "stopped".to_owned(),
+            StopCause::Timer => match self.stop_timer_minutes() {
+                Some(m) => format!("stopped by the {m}m safety timer (t: off)"),
+                None => "stopped by the safety timer".to_owned(),
+            },
+            StopCause::Distance => match self.stop_distance_mm() {
+                Some(mm) => format!(
+                    "stopped by the {} distance cutoff (m: off)",
+                    ui::fmt_dist(mm)
+                ),
+                None => "stopped by the distance cutoff".to_owned(),
+            },
+        }
+    }
+
+    /// A cutoff that fired is spent. It is re-armed on every `enter`, so left
+    /// armed it stops the next attempt at the same place, and the one after
+    /// that — which reads as the plotter dying early for no reason. Arming is
+    /// one keypress away when the next run should stop too.
+    fn disarm(&mut self, cause: StopCause) {
+        match cause {
+            StopCause::Asked => {}
+            StopCause::Timer => self.stop_timer = None,
+            StopCause::Distance => self.stop_distance = None,
+        }
     }
 
     /// Cached dry-run of the loaded plan, for the ETA and the idle summary.
@@ -1014,6 +1050,71 @@ mod tests {
     /// The drawing follows the head: jog to the corner of the sheet, press
     /// enter, and the plot starts under the pen — not in the middle of the A0
     /// field, which is where fitting used to centre it.
+    /// A cutoff is re-armed on every `enter`, so one that has fired must let
+    /// go — otherwise the next run stops at the same distance, and the one
+    /// after that, which on paper looks like the plotter dying early. The note
+    /// has to name it too: "stopped" alone sends the operator to the machine
+    /// looking for a fault the app caused on purpose.
+    #[test]
+    fn a_fired_distance_cutoff_names_itself_and_disarms() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('m'));
+        assert_eq!(app.stop_distance_mm(), Some(STOP_DISTANCE_MM[0]));
+
+        let note = app.stop_note(StopCause::Distance);
+        app.disarm(StopCause::Distance);
+
+        assert!(
+            note.contains("distance cutoff") && note.contains('m'),
+            "the note does not say what stopped the plot: {note}"
+        );
+        assert_eq!(app.stop_distance_mm(), None, "the cutoff stayed armed");
+    }
+
+    /// The timer is the same bargain, and a stop asked for by hand is not: it
+    /// says nothing about whether the cutoffs are still wanted.
+    #[test]
+    fn only_the_cutoff_that_fired_is_disarmed() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('t'));
+        app.on_key(press('m'));
+
+        app.disarm(StopCause::Asked);
+        assert!(
+            app.stop_timer_minutes().is_some(),
+            "a manual stop disarmed the timer"
+        );
+        assert!(
+            app.stop_distance_mm().is_some(),
+            "a manual stop disarmed the cutoff"
+        );
+
+        app.disarm(StopCause::Timer);
+        assert!(app.stop_timer_minutes().is_none(), "the timer stayed armed");
+        assert!(
+            app.stop_distance_mm().is_some(),
+            "the timer took the cutoff with it"
+        );
+    }
+
+    /// The key that dismisses the resume prompt is then handled normally
+    /// (§3.3), which also means `m` there arms a cutoff. That is how a plot
+    /// came to stop after 50 cm with nobody having asked for it, so the
+    /// behaviour is pinned down rather than left to be rediscovered.
+    #[test]
+    fn a_key_dismissing_the_resume_prompt_still_acts() {
+        let (mut app, _sent) = app_with_resume_prompt();
+
+        app.on_key(press('m'));
+
+        assert!(app.resume_prompt().is_none(), "the prompt survived the key");
+        assert_eq!(
+            app.stop_distance_mm(),
+            Some(STOP_DISTANCE_MM[0]),
+            "the dismissing key never reached the normal handler"
+        );
+    }
+
     #[test]
     fn the_plot_starts_where_the_head_is_after_a_jog() {
         let mut app = app_with_a_drawing();

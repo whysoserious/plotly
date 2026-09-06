@@ -146,7 +146,7 @@ fn a_y_zero_move_prints_without_negative_zero() {
 
     // Wait for the plan to finish.
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::PlanDone { .. } | Event::Aborted) {
+        if matches!(event, Event::PlanDone { .. } | Event::Aborted(_)) {
             break;
         }
     }
@@ -186,7 +186,7 @@ fn resume_from_an_index_sends_only_the_remaining_ops_once() {
     });
 
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
-        if matches!(event, Event::PlanDone { .. } | Event::Aborted) {
+        if matches!(event, Event::PlanDone { .. } | Event::Aborted(_)) {
             break;
         }
     }
@@ -316,7 +316,7 @@ fn the_frame_can_be_stopped_partway() {
     let mut aborted = false;
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         match event {
-            Event::Aborted => {
+            Event::Aborted(_) => {
                 aborted = true;
                 break;
             }

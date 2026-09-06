@@ -23,6 +23,19 @@ pub(crate) fn fmt_time(secs: f64) -> String {
     }
 }
 
+/// Millimetres as `NNmm (NNcm)`, or metres past a metre.
+///
+/// Next to [`fmt_time`] for the same reason: the status bar, the armed-cutoff
+/// tag and the note a fired cutoff leaves behind all have to spell a distance
+/// the same way, or the operator cannot match the note to the tag.
+pub(crate) fn fmt_dist(mm: f64) -> String {
+    if mm >= 1000.0 {
+        format!("{:.2}m", mm / 1000.0)
+    } else {
+        format!("{:.0}mm ({:.1}cm)", mm, mm / 10.0)
+    }
+}
+
 /// Width of the stroke list when it shares the canvas row.
 const STROKES_WIDTH: u16 = 30;
 

@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::fmt_time;
+use super::{fmt_dist, fmt_time};
 use crate::app::{Activity, App};
 use crate::keys::{Binding, CONSOLE_BINDINGS, NAVIGATION_BINDINGS};
 use crate::plan::estimate::Estimate;
@@ -101,15 +101,6 @@ fn cutoffs_line(app: &App) -> String {
         String::new()
     } else {
         format!(" [{}]", parts.join(", "))
-    }
-}
-
-/// Millimetres as `NNmm (NNcm)`, or metres past a metre.
-fn fmt_dist(mm: f64) -> String {
-    if mm >= 1000.0 {
-        format!("{:.2}m", mm / 1000.0)
-    } else {
-        format!("{:.0}mm ({:.1}cm)", mm, mm / 10.0)
     }
 }
 
