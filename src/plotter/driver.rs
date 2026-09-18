@@ -229,6 +229,11 @@ pub struct Driver {
     /// host tracks it by dead reckoning since the firmware volunteers nothing
     /// but `?` (§2.4). Used for the preview cursor (step 2.5).
     pos: Point,
+    /// Whether [`Driver::pos`] still describes the carriage. Releasing the
+    /// steppers lets it be pushed by hand, and no amount of asking the board
+    /// recovers that: the steppers are open-loop, so only `$H` re-establishes
+    /// a firm reference (§2.4).
+    pos_trusted: bool,
 }
 
 impl Driver {
@@ -242,6 +247,7 @@ impl Driver {
             transform: Transform::idraw(),
             pen: Pen::Up,
             pos: Point::new(0.0, 0.0),
+            pos_trusted: true,
         }
     }
 
@@ -362,6 +368,7 @@ impl Driver {
         self.command_within("$H", HOMING_TIMEOUT)?;
         self.pen = Pen::Up;
         self.pos = Point::new(0.0, 0.0);
+        self.pos_trusted = true;
         tracing::info!("homed; machine origin is now the home corner");
         Ok(())
     }
@@ -373,8 +380,14 @@ impl Driver {
     /// the next `$H` (§2.4).
     pub fn disable_motors(&mut self) -> Result<(), DriverError> {
         self.command("$SLP")?;
+        self.pos_trusted = false;
         tracing::warn!("motors disabled; position is unknown until the next homing");
         Ok(())
+    }
+
+    /// Whether [`Driver::position`] can still be believed — see `pos_trusted`.
+    pub fn position_trusted(&self) -> bool {
+        self.pos_trusted
     }
 
     /// Wait until everything already sent has actually been drawn.

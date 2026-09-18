@@ -80,7 +80,7 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
                 progress.push((done, total));
                 last_progress_secs = elapsed_secs;
             }
-            Event::PlanDone { elapsed_secs } => {
+            Event::PlanDone { elapsed_secs, .. } => {
                 done_seen = true;
                 done_secs = elapsed_secs;
                 break;

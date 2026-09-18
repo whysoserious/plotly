@@ -230,6 +230,7 @@ fn run_tui(
         port: driver.port().to_owned(),
         pen: driver.pen(),
         position: driver.position(),
+        position_trusted: driver.position_trusted(),
     };
     let worker = plotter::worker::Worker::spawn(driver);
 

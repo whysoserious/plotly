@@ -82,6 +82,9 @@ pub struct MachineState {
     pub port: String,
     pub pen: Pen,
     pub position: Point,
+    /// Whether `position` still describes the carriage: false once the steppers
+    /// have been released, true again after homing (§2.4).
+    pub position_trusted: bool,
 }
 
 /// Why a plan ended before its last op. The operator reads the reason on
@@ -124,7 +127,15 @@ pub enum Event {
     /// a resumed job this is the time of *this* run, not of the whole drawing.
     /// Wall time across a pause is not the plot's time; it is however long the
     /// operator was away.
-    PlanDone { elapsed_secs: f64 },
+    ///
+    /// `motors_released` says whether the steppers were let go at the end. They
+    /// normally are, and then the machine position is only trustworthy until
+    /// somebody moves the carriage — which the operator has to be told, since
+    /// the next plot takes its origin from where the head is (§2.4 C).
+    PlanDone {
+        elapsed_secs: f64,
+        motors_released: bool,
+    },
     /// The plan was stopped or aborted before the end; `StopCause` says by
     /// what, so the status bar can name it rather than just say "stopped".
     Aborted(StopCause),
@@ -451,6 +462,15 @@ fn run_plan(
         checkpoint(progress, sent, total, driver);
     }
 
+    // The last ops are only *queued* when the loop ends — `ok` means queued,
+    // not drawn (§15.1) — so the machine is still finishing the drawing here.
+    // Wait for it, so "done" means the pen has actually stopped and the time
+    // the note reports is the time the drawing took.
+    emit(events, Event::Busy("finishing".to_owned()));
+    if let Err(err) = driver.drain() {
+        tracing::warn!(%err, "could not drain at the end of the plan");
+    }
+
     let elapsed_secs = started.elapsed().saturating_sub(paused_for).as_secs_f64();
     tracing::info!(ops = total, secs = elapsed_secs, "plan done");
     if let Some(writer) = progress {
@@ -460,7 +480,35 @@ fn run_plan(
         }
     }
 
-    emit(events, Event::PlanDone { elapsed_secs });
+    // Release the steppers now the drawing is down (user request). A finished
+    // plot can sit on the bed for hours before anyone comes back — the log had
+    // one finish at 05:58 and the coils still energised at 09:28 — and there is
+    // nothing left for them to hold in place. The `drain` above is what makes
+    // this safe: cutting the power with a full planner buffer would abandon the
+    // last shape.
+    //
+    // The cost is the machine position: a released carriage can be pushed by
+    // hand, so what we know about `MPos` is only good until someone does
+    // (§2.4). `PlanDone` carries that out to the status bar rather than letting
+    // the next `enter` quietly place a drawing from a stale origin.
+    //
+    // Only on a plan that ran to its end. A stop, a cutoff or a panic is a plot
+    // somebody means to resume or reposition, and those need the position.
+    let motors_released = match driver.disable_motors() {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(%err, "could not release the motors after the plan");
+            false
+        }
+    };
+
+    emit(
+        events,
+        Event::PlanDone {
+            elapsed_secs,
+            motors_released,
+        },
+    );
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(None)
 }
@@ -772,6 +820,7 @@ fn snapshot(driver: &Driver) -> MachineState {
         port: driver.port().to_owned(),
         pen: driver.pen(),
         position: driver.position(),
+        position_trusted: driver.position_trusted(),
     }
 }
 
@@ -872,6 +921,59 @@ mod tests {
             after_resume > at_pause,
             "the pause spent the timer: resume stopped the plan instantly at \
              {at_pause} lines"
+        );
+    }
+
+    /// A finished plot releases the steppers (user request): the drawing is
+    /// down, nothing needs holding, and a plot can sit on the bed for hours.
+    /// The drain has to come first — cutting the power with a full planner
+    /// buffer would abandon the last shape.
+    #[test]
+    fn a_finished_plan_releases_the_motors_after_the_drawing_is_down() {
+        use crate::geometry::{Placement, Point};
+        use crate::plan::{Plan, PlanSettings};
+        use crate::plotter::mock::MockTransport;
+        use crate::plotter::Connection;
+
+        let plan = Plan::build(
+            &[vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)]],
+            &Placement::identity(),
+            &PlanSettings::default(),
+        );
+        let mock = MockTransport::new();
+        let sent = mock.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(mock),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+
+        worker.send(Command::RunPlan {
+            plan,
+            progress: None,
+            start_index: 0,
+        });
+
+        let mut released = None;
+        for _ in 0..400 {
+            if let Some(Event::PlanDone {
+                motors_released, ..
+            }) = worker.recv_timeout(Duration::from_millis(50))
+            {
+                released = Some(motors_released);
+                break;
+            }
+        }
+        assert_eq!(released, Some(true), "the plan did not report the release");
+
+        let lines = sent.lock().unwrap().clone();
+        let drained = lines.iter().position(|l| l.starts_with("G4"));
+        let slept = lines.iter().position(|l| l == "$SLP");
+        assert!(slept.is_some(), "the motors were left energised: {lines:?}");
+        assert!(
+            drained < slept,
+            "the motors were cut before the machine finished: {lines:?}"
         );
     }
 }

@@ -266,7 +266,10 @@ impl App {
                     self.activity =
                         Activity::Busy(format!("paused {done}/{total}, pen up (r resume)"));
                 }
-                Event::PlanDone { elapsed_secs } => {
+                Event::PlanDone {
+                    elapsed_secs,
+                    motors_released,
+                } => {
                     self.pausing = false;
                     self.paused = false;
                     if let Some(plan) = &self.plan {
@@ -275,7 +278,18 @@ impl App {
                     // How long it took is the first thing asked once a plot
                     // ends, and by then the live counter is gone from the
                     // status bar — so the note keeps the number on screen.
-                    self.note = Some(format!("done in {}", ui::fmt_time(elapsed_secs)));
+                    //
+                    // Released motors go in the same note, because they change
+                    // what the *next* `enter` means: the drawing takes its
+                    // origin from where the head is (§2.4 C), and once the
+                    // carriage can be pushed by hand that is only true until
+                    // somebody pushes it. `h` re-establishes it.
+                    let time = ui::fmt_time(elapsed_secs);
+                    self.note = Some(if motors_released {
+                        format!("done in {time} - motors released, home (h) before the next plot")
+                    } else {
+                        format!("done in {time}")
+                    });
                 }
                 Event::Aborted(cause) => {
                     self.pausing = false;
@@ -526,7 +540,11 @@ impl App {
         // would tear the drawing in two.
         if self.resume_from.is_none() && !self.shapes.is_empty() {
             self.place_at_head();
+            // Off-field first, stale head second: when both apply the stale
+            // head is the reason the bounds look wrong, so it is the note worth
+            // keeping on screen.
             self.warn_if_off_field();
+            self.warn_if_head_is_stale();
         }
         // Cloned up front: the worker takes ownership of the plan, and the copy
         // the app keeps stays available for the preview and the stroke list.
@@ -584,6 +602,26 @@ impl App {
             outline,
             feed: self.profile.plan.travel_feed,
         });
+    }
+
+    /// Say so when the drawing is about to be placed from a head position the
+    /// machine can no longer vouch for.
+    ///
+    /// After the steppers are released the carriage can be pushed by hand, and
+    /// nothing on an open-loop machine notices. The plot would still run — from
+    /// wherever the head was *last known* to be — so this is a warning, not a
+    /// refusal: `h` re-establishes the reference, and if nobody touched the
+    /// carriage the old position is still right.
+    fn warn_if_head_is_stale(&mut self) {
+        if self.machine.position_trusted {
+            return;
+        }
+        tracing::warn!(
+            x = self.machine.position.x,
+            y = self.machine.position.y,
+            "placing the drawing from a head position the machine cannot vouch for"
+        );
+        self.note = Some("warning: motors were released - press h to home, or draw from the last known head position".to_owned());
     }
 
     /// Put a note on screen when the placed drawing leaves the machine's field.
@@ -922,6 +960,7 @@ mod tests {
             port: "mock".to_owned(),
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
+            position_trusted: true,
         };
         let app = App::new(
             worker,
@@ -993,6 +1032,7 @@ mod tests {
             port: "mock".to_owned(),
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
+            position_trusted: true,
         };
         let app = App::new(
             worker,
@@ -1071,6 +1111,7 @@ mod tests {
             port: "mock".to_owned(),
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
+            position_trusted: true,
         };
         // The shape's first point is also its top-left corner, so "where the
         // drawing starts" and "where its corner sits" are the same assertion.
@@ -1327,6 +1368,7 @@ mod tests {
             port: "mock".to_owned(),
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
+            position_trusted: true,
         };
         // Many short strokes: plenty of pen-up boundaries for a pause to land on.
         let shapes: Vec<Shape> = (0..60)
@@ -1374,6 +1416,52 @@ mod tests {
         );
     }
 
+    /// §2.4 C: the head's position when `enter` is pressed is the drawing's
+    /// origin. A plot that has just finished must not move that goalpost — the
+    /// next drawing starts where the pen actually stands, not at the bed's
+    /// corner.
+    #[test]
+    fn a_finished_plot_leaves_the_next_one_starting_at_the_head() {
+        let (mut app, _sent) = app_and_wire();
+        app.shapes = vec![Shape::unlabelled(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+        ])];
+        // The head is parked somewhere in the middle of the sheet, as it would
+        // be after jogging to the corner of the paper.
+        app.machine.position = Point::new(120.0, 250.0);
+
+        app.on_key(key(KeyCode::Enter)); // draw it
+        for _ in 0..400 {
+            app.drain_worker_events();
+            if app
+                .note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("done in"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            app.note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("done in")),
+            "the plot never finished: {:?}",
+            app.note
+        );
+
+        let head_after = app.machine.position;
+        app.on_key(key(KeyCode::Enter)); // and again, from where the pen is
+        let placed = app.plan().and_then(Plan::drawn_bounds).expect("a plan").0;
+
+        assert!(
+            close(placed, head_after),
+            "the second plot ignored the head: drawing starts at {placed:?}, \
+             head is at {head_after:?}"
+        );
+    }
+
     /// An app mid-plot, held at a pause with the pen up.
     fn paused_mid_plot() -> (App, Arc<Mutex<Vec<String>>>) {
         let transport = MockTransport::with_read_delay(Duration::from_millis(1));
@@ -1389,6 +1477,7 @@ mod tests {
             port: "mock".to_owned(),
             pen: Pen::Up,
             position: Point::new(0.0, 0.0),
+            position_trusted: true,
         };
         let shapes: Vec<Shape> = (0..60)
             .map(|i| {
@@ -1467,5 +1556,39 @@ mod tests {
             "the pen key did nothing while paused: {after:?}"
         );
         assert!(app.paused, "the pen key ended the pause");
+    }
+
+    /// Releasing the steppers costs the origin: the carriage can be pushed by
+    /// hand and an open-loop machine never notices. The next `enter` still
+    /// draws — from the last known head — but it has to say so, or the drawing
+    /// lands somewhere nobody chose (§2.4 C).
+    #[test]
+    fn enter_warns_when_the_head_is_no_longer_vouched_for() {
+        let mut app = app_with_a_drawing();
+        app.machine.position_trusted = false;
+
+        app.on_key(key(KeyCode::Enter));
+
+        let note = app.note.clone().unwrap_or_default();
+        assert!(
+            note.contains("motors were released") && note.contains('h'),
+            "enter placed the drawing from a stale head without a word: {note:?}"
+        );
+    }
+
+    /// ...and says nothing when the machine can still vouch for the head, so
+    /// the warning keeps its meaning.
+    #[test]
+    fn enter_is_quiet_when_the_head_is_known() {
+        let mut app = app_with_a_drawing();
+        assert!(app.machine.position_trusted);
+
+        app.on_key(key(KeyCode::Enter));
+
+        let note = app.note.clone().unwrap_or_default();
+        assert!(
+            !note.contains("motors were released"),
+            "warned about a head the machine knows: {note:?}"
+        );
     }
 }

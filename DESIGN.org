@@ -730,6 +730,27 @@ Wstrzymanie *nie* jest realtime i celowo *nie* hamuje w połowie kreski:
 - ~!~/=~= *nie są już używane* (usunięte z ~driver.rs~); fakty o nich zostają w 15.1 na wypadek,
   gdyby kiedyś potrzebne było twarde zatrzymanie w ruchu.
 
+*Koniec plota gasi silniki (2026-09-14, decyzja użytkownika).* Plan, który doszedł do końca,
+robi po kolei: ~drain~ (~G4~) → zapis ~finish~ → ~$SLP~ → ~PlanDone~. Skończony rysunek potrafi
+leżeć na blacie godzinami (log: koniec 05:58, silniki zgaszone ręcznie dopiero 09:28), a nie ma
+już czego trzymać w miejscu. ~drain~ *przed* ~$SLP~ jest obowiązkowy — odcięcie zasilania przy
+pełnym buforze porzuciłoby ostatni kształt.
+/Tylko po normalnym końcu:/ stop, cutoff i panic zostawiają silniki pod napięciem, bo taki
+wydruk zwykle się wznawia albo poprawia.
+
+*Cena: origin. Dlatego jest głośna.* Po ~$SLP~ karetkę można pchnąć ręką, a maszyna bez
+sprzężenia zwrotnego tego nie zauważy — pytanie o ~MPos~ też nie pomoże, bo firmware wie tyle
+samo co my. To fizyka, nie do obejścia w kodzie; jedyne, co można zrobić, to *nie kłamać*:
+- ~Driver::pos_trusted~ — gaśnie przy ~$SLP~, wraca przy ~$H~; jedzie w ~MachineState~,
+- nota po plocie: ~done in … - motors released, home (h) before the next plot~,
+- ~Enter~ przy niepewnej głowicy *rysuje* (od ostatnio znanej pozycji), ale najpierw mówi
+  ~motors were released - press h to home…~. Ostrzeżenie, nie odmowa: jeśli nikt nie ruszył
+  karetki, stara pozycja jest nadal dobra, a odmowa blokowałaby poprawny scenariusz.
+Kolejność not: ~off-field~ najpierw, nieufna głowica *po* niej — gdy zachodzą obie, to nieufna
+głowica jest przyczyną dziwnych bounds i ona ma zostać na ekranie.
+/Fakt ✔:/ ~$SLP~ na DrawCore nie wymaga soft-resetu — log z 2026-09-06 pokazuje ~$SLP~
+o 15:08:11 i udane ~$H~ o 15:08:30 w tej samej sesji.
+
 *Pauza nie może zjadać komend (2026-09-12).* ~hold~ blokował się na ~commands.recv()~ i miał
 na końcu ~_ => {}~ — czyli *po cichu wyrzucał* wszystko poza ~Resume~/~Stop~/~EmergencyStop~/
 ~Shutdown~. Skutki widać w logu z 11:20: trzy razy ~starting plot~, trzy nowe katalogi joba

@@ -30,6 +30,7 @@ fn app_over_mock() -> (App, Arc<Mutex<Vec<String>>>) {
         port: "mock".to_owned(),
         pen: Pen::Up,
         position: Point::new(0.0, 0.0),
+        position_trusted: true,
     };
     let app = App::new(
         worker,
