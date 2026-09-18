@@ -295,8 +295,7 @@ fn run_plan(
     // the pen before continuing from `start_index` (§6). Absolute coordinates
     // make this safe — the ops we re-send land in exactly the same place.
     if start_index > 0 {
-        emit(events, Event::Busy("resuming".to_owned()));
-        if let Err(err) = resume_to(driver, plan, start_index) {
+        if let Err(err) = resume_to(driver, plan, start_index, events) {
             tracing::error!(%err, "resume preamble failed");
             emit(events, Event::Error(err.to_string()));
             emit(events, Event::State(snapshot(driver)));
@@ -427,6 +426,7 @@ fn run_plan(
             tracing::warn!(%err, "final progress write failed");
         }
     }
+
     emit(events, Event::PlanDone { elapsed_secs });
     emit(events, Event::State(snapshot(driver)));
     ControlFlow::Continue(())
@@ -482,7 +482,12 @@ fn run_frame(
 /// the last drawn point with the pen up, then restore the pen and feed. The op
 /// at `start_index` runs normally afterwards, and since coordinates are
 /// absolute, re-sending it lands in the same place (§6, idempotent).
-fn resume_to(driver: &mut Driver, plan: &Plan, start_index: usize) -> Result<(), DriverError> {
+fn resume_to(
+    driver: &mut Driver,
+    plan: &Plan,
+    start_index: usize,
+    events: &Sender<Event>,
+) -> Result<(), DriverError> {
     let state = ResumeState::at(plan, start_index);
     tracing::info!(
         from = start_index,
@@ -492,7 +497,16 @@ fn resume_to(driver: &mut Driver, plan: &Plan, start_index: usize) -> Result<(),
         "resuming"
     );
 
+    // Both stages are named, because both are long and neither looks like
+    // drawing: homing takes ~25 s on this machine and drives the head to the
+    // far corner, and the travel back can cross the whole sheet. Under one
+    // "resuming" label that is a minute of a screen that says nothing.
+    emit(events, Event::Busy("resuming: homing".to_owned()));
     driver.home()?; // firm origin from the endstops (§2.4)
+    emit(
+        events,
+        Event::Busy(format!("resuming: travelling to op {start_index}")),
+    );
     driver.pen_up()?;
     driver.set_feed(RESUME_TRAVEL_FEED)?;
     driver.move_to(state.pos)?; // travel to the stop point, pen up

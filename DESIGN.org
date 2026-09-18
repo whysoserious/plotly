@@ -551,6 +551,16 @@ job; uruchomiony *na pliku/tekście* — tylko job o *tym samym* ~meta.source~
 (~job::latest_resumable_from~). Powrót do wstrzymanego wydruku to zwykle powtórzenie tej samej
 komendy, ale prośba o *inny* rysunek nie może trafić na cudze resztki.
 
+*~Enter~ wznawia od razu — nie „wczytuje" (2026-09-06).* Wcześniej ~Enter~ tylko ładował job
+i zostawiał notkę „press enter"; z fotela operatora wyglądało to jak zepsute wznowienie:
+overlay znikał, log pisał ~resuming job … from=1584~, a ploter stał. Drugiego ~Enter~ nikt nie
+naciskał, bo prompt mówi „[Enter] resume". Teraz ~Enter~ odpowiada na pytanie *i* startuje plan.
+Bezpieczne, bo preambuła i tak zaczyna od ~$H~ (procedura niżej, krok 2) — pozycja głowicy przed
+wznowieniem nie ma znaczenia.
+*Preambuła nazywa swoje etapy:* ~resuming: homing~ (~25 s i głowica jedzie w róg) i
+~resuming: travelling to op N~ (przejazd przez arkusz). Pod jedną etykietą „resuming" była to
+minuta ekranu, który nic nie mówi — a to dokładnie ten rodzaj ciszy, który każe wcisnąć Ctrl-C.
+
 ** Procedura wznawiania (mocna dzięki homingowi iDraw)
 1. Połącz + handshake.
 2. ~$H~ homing → pewny, absolutny układ odniesienia z krańcówek.

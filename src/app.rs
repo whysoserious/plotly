@@ -422,6 +422,15 @@ impl App {
         match key.code {
             KeyCode::Enter => {
                 self.accept_resume();
+                // The prompt says "[Enter] resume", so Enter resumes. Loading
+                // the job and then waiting for a *second* enter looked from the
+                // operator's chair exactly like a resume that did nothing: the
+                // overlay went away, the log said "resuming job", and the
+                // machine stood still. The preamble homes first (§6), so this
+                // is safe to start from wherever the head happens to be.
+                if self.resume_from.is_some() {
+                    self.start_plot();
+                }
                 ResumeReply::Handled
             }
             KeyCode::Char('n') | KeyCode::Esc => {
@@ -466,10 +475,7 @@ impl App {
                 // committed index is already on the paper.
                 self.strokes_done = 0;
                 self.set_ops_done(committed);
-                self.note = Some(format!(
-                    "resume from {}% — press enter",
-                    resumable.percent()
-                ));
+                self.note = Some(format!("resuming from {}%", resumable.percent()));
             }
             Err(err) => {
                 tracing::warn!(%err, "could not load the job to resume");
@@ -976,6 +982,19 @@ mod tests {
         (app, sent)
     }
 
+    /// Wait for one exact line to reach the wire; the worker runs the command
+    /// on its own thread, so the check has to be given time rather than taken
+    /// once.
+    fn wire_has(sent: &Arc<Mutex<Vec<String>>>, line: &str) -> bool {
+        for _ in 0..200 {
+            if sent.lock().unwrap().iter().any(|l| l == line) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     /// Wait for the worker thread to catch up with what it was sent.
     fn wire_settles(sent: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
         for _ in 0..200 {
@@ -1235,11 +1254,35 @@ mod tests {
         );
     }
 
+    /// The prompt says "[Enter] resume", so enter has to resume — all the way
+    /// to the machine. It used to only load the job and leave a note asking for
+    /// a *second* enter: the overlay vanished, the log said "resuming job", and
+    /// the plotter stood still, which reads as a resume that is broken.
     #[test]
-    fn enter_accepts_the_resume_instead_of_dismissing() {
-        let (mut app, _sent) = app_with_resume_prompt();
+    fn enter_on_the_resume_prompt_resumes_all_the_way_to_the_wire() {
+        let (mut app, sent) = app_with_resume_prompt();
+
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
         assert!(app.resume_prompt().is_none(), "enter answers the prompt");
-        assert_eq!(app.resume_from(), Some(20 - crate::job::PLANNER_BLOCKS));
+        // The preamble homes before it travels to the stop point (§6), so `$H`
+        // is the proof that a plan went out rather than just being loaded.
+        assert!(
+            wire_has(&sent, "$H"),
+            "enter left the machine idle: {:?}",
+            sent.lock().unwrap()
+        );
+    }
+
+    /// The resume starts from the committed index, which lags the ops sent by
+    /// the planner depth (§6) — the checkpoint above wrote 20 sent.
+    #[test]
+    fn the_resume_starts_from_the_committed_index() {
+        let (mut app, _sent) = app_with_resume_prompt();
+        let expected = 20 - crate::job::PLANNER_BLOCKS;
+
+        app.accept_resume();
+
+        assert_eq!(app.resume_from(), Some(expected));
     }
 }
