@@ -373,8 +373,16 @@ pytanie), a ~--rampladder~ ma rampę, ale drabinkuje długość rozbiegu, nie fe
 kartki:* jeden zrampowany wężyk na ~draw_feed~, rzędy 2000/2500/3000/4000, pytanie „który rząd
 jest ostatnim czystym" — dokładnie metoda z 2.9. Do tego czasu 2000 (tyle co referencja).
 
-** 2.10b Co zmierzono i wyszło zero
-Warto, bo obie rzeczy wyglądają na pokrętła prędkości:
+** 2.10b Nowe pokrętła firmware'u dla osi Z (❓ otwarte)
+~z_max_feed~ (~$112~) i ~z_accel_mm_s2~ (~$122~), pisane do EEPROM jak ~accel_mm_s2~ i ~$11~.
+Powód: *ruchy pióra to 40% wydruku* (2.8), a ruch Z 4,5 mm mierzy *240 ms* przy ~82 ms, które
+wychodzą z trapezu przy ~F5000~ i 3000 mm/s². Ta trzykrotność jest otwarta od 2.6 i *to są
+jedyne dwie liczby na płytce, które mogą ją tłumaczyć* — do teraz nie dało się ich ruszyć
+z plotly. ❓ Jeśli podniesienie ich nic nie da, to też jest wynik: znaczy, że ogranicza
+mechanizm podnoszenia i zostaje samo ~pen_up_z~ (−6 min w estymacie, realnie pewnie sporo
+więcej, bo estymata liczy ruch Z po 54 ms).
+
+*Co zmierzono i wyszło zero* — warto, bo obie rzeczy wyglądają na pokrętła prędkości:
 - ~junction_deviation_mm~ (~$11~): *0,0 min* na ~example.svg~, przy rampie i bez niej. Hatch
   z vpype zawraca o 180° na końcu każdego przejścia, a *żadna tolerancja rogu nie przenosi
   prędkości przez zawrót*. Na rysunku ze spłaszczonych krzywych miałoby znaczenie.
@@ -939,8 +947,8 @@ draw_feed  = 1500
 Klucze: ~width_mm~, ~height_mm~, ~pen_up_z~, ~pen_down_z~, ~pen_z_feed~,
 ~pen_settle_up_secs~, ~pen_settle_down_secs~, ~pen_fence~, ~draw_feed~, ~travel_feed~,
 ~jog_feed~, ~max_feed~, ~max_segment_mm~, ~ramp_mm~, ~ramp_feed~, ~ramp_angle_deg~ oraz
-*dwa pisane do EEPROM płytki*: ~accel_mm_s2~ (~$120~/~$121~) i ~junction_deviation_mm~
-(~$11~).
+*cztery pisane do EEPROM płytki*: ~accel_mm_s2~ (~$120~/~$121~), ~junction_deviation_mm~
+(~$11~), ~z_max_feed~ (~$112~), ~z_accel_mm_s2~ (~$122~).
 
 *Pełna, anotowana lista z wartościami domyślnymi i kosztem każdego pokrętła w minutach jest
 w ~default.conf~ w korzeniu repo* — plik jest dokumentacją, plotly go nie czyta, a test

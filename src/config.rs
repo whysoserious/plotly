@@ -89,6 +89,14 @@ pub struct ProfileOverride {
     /// Junction deviation to put on the machine, mm (`$11`) — how much speed
     /// the planner may carry through a corner. Also written back.
     pub junction_deviation_mm: Option<f64>,
+    /// Speed limit of the pen axis to put on the machine, mm/min (`$112`).
+    /// Written back like the two above, and the ceiling on `pen_z_feed`.
+    pub z_max_feed: Option<u32>,
+    /// Acceleration of the pen axis to put on the machine, mm/s² (`$122`).
+    /// Written back. Two pen moves per shape are 40% of a hatched plot's
+    /// runtime, and this is one of the two numbers that decide what one costs
+    /// (§2.10).
+    pub z_accel_mm_s2: Option<f64>,
 }
 
 /// Why a config file could not be used.
@@ -209,6 +217,8 @@ mod tests {
             ramp_angle_deg = 35.0
             accel_mm_s2 = 500.0
             junction_deviation_mm = 0.002
+            z_max_feed = 11000
+            z_accel_mm_s2 = 4200.0
             "#,
         )
         .expect("valid config");
@@ -232,6 +242,8 @@ mod tests {
         assert_eq!(o.ramp_angle_deg, Some(35.0));
         assert_eq!(o.accel_mm_s2, Some(500.0));
         assert_eq!(o.junction_deviation_mm, Some(0.002));
+        assert_eq!(o.z_max_feed, Some(11000));
+        assert_eq!(o.z_accel_mm_s2, Some(4200.0));
     }
 
     /// `default.conf` is the documentation for this struct, so it has to stay
@@ -266,6 +278,8 @@ mod tests {
             ramp_angle_deg,
             accel_mm_s2,
             junction_deviation_mm,
+            z_max_feed,
+            z_accel_mm_s2,
         } = over;
         let documented = [
             ("width_mm", width_mm.is_some()),
@@ -286,6 +300,8 @@ mod tests {
             ("ramp_angle_deg", ramp_angle_deg.is_some()),
             ("accel_mm_s2", accel_mm_s2.is_some()),
             ("junction_deviation_mm", junction_deviation_mm.is_some()),
+            ("z_max_feed", z_max_feed.is_some()),
+            ("z_accel_mm_s2", z_accel_mm_s2.is_some()),
         ];
         let missing: Vec<&str> = documented
             .iter()

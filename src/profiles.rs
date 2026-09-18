@@ -42,9 +42,13 @@ mod grbl {
     /// Max XY feed rates, mm/min.
     pub const MAX_RATE_X: u16 = 110;
     pub const MAX_RATE_Y: u16 = 111;
+    /// Max feed rate of the pen axis, mm/min.
+    pub const MAX_RATE_Z: u16 = 112;
     /// Acceleration per axis, mm/s².
     pub const ACCEL_X: u16 = 120;
     pub const ACCEL_Y: u16 = 121;
+    /// Acceleration of the pen axis, mm/s².
+    pub const ACCEL_Z: u16 = 122;
     /// Maximum travel per axis, mm — the drawable field.
     pub const TRAVEL_X: u16 = 130;
     pub const TRAVEL_Y: u16 = 131;
@@ -71,6 +75,17 @@ pub struct Profile {
     /// Junction deviation, mm (`$11`): how far off a corner the planner may
     /// cut, and so how much speed it may carry through one.
     pub junction_deviation_mm: f64,
+    /// Fastest the pen axis may move, mm/min (`$112`). The ceiling on
+    /// [`crate::plotter::driver::PenSettings::z_feed`].
+    pub z_max_feed: u32,
+    /// Acceleration of the pen axis, mm/s² (`$122`).
+    ///
+    /// Here for the same reason as `accel_mm_s2`: a pen move costs ~240 ms and
+    /// a drawing pays for two of them per shape, which is 40% of the runtime
+    /// on a hatched plot (§2.8). This and `z_max_feed` are the only two
+    /// numbers on the board that could account for it, and until they were
+    /// reachable from a config file nobody could try them (§2.10).
+    pub z_accel_mm_s2: f64,
 }
 
 /// Fallback XY speed limit when the firmware has not told us one: the slower of
@@ -86,6 +101,12 @@ const DEFAULT_ACCEL_MM_S2: f64 = 3_000.0;
 
 /// Fallback junction deviation: Grbl's own default for `$11`.
 const DEFAULT_JUNCTION_DEVIATION_MM: f64 = 0.01;
+
+/// Fallback pen-axis speed limit: our machine's `$112` (§15.1).
+const DEFAULT_Z_MAX_FEED: u32 = 15_000;
+
+/// Fallback pen-axis acceleration: our machine's `$122` (§15.1).
+const DEFAULT_Z_ACCEL_MM_S2: f64 = 3_000.0;
 
 impl Profile {
     /// The built-in profile called `name`, if there is one.
@@ -105,6 +126,8 @@ impl Profile {
             max_feed: DEFAULT_MAX_FEED,
             accel_mm_s2: DEFAULT_ACCEL_MM_S2,
             junction_deviation_mm: DEFAULT_JUNCTION_DEVIATION_MM,
+            z_max_feed: DEFAULT_Z_MAX_FEED,
+            z_accel_mm_s2: DEFAULT_Z_ACCEL_MM_S2,
         })
     }
 
@@ -134,12 +157,21 @@ impl Profile {
         if let Some(deviation) = reported.get(grbl::JUNCTION_DEVIATION).filter(|d| *d > 0.0) {
             self.junction_deviation_mm = deviation;
         }
+        // The pen axis has one of each and no second axis to be slower than.
+        if let Some(rate) = reported.get(grbl::MAX_RATE_Z).filter(|r| *r > 0.0) {
+            self.z_max_feed = rate as u32;
+        }
+        if let Some(accel) = reported.get(grbl::ACCEL_Z).filter(|a| *a > 0.0) {
+            self.z_accel_mm_s2 = accel;
+        }
         tracing::debug!(
             width_mm = self.field.width_mm,
             height_mm = self.field.height_mm,
             max_feed = self.max_feed,
             accel_mm_s2 = self.accel_mm_s2,
             junction_deviation_mm = self.junction_deviation_mm,
+            z_max_feed = self.z_max_feed,
+            z_accel_mm_s2 = self.z_accel_mm_s2,
             "field and limits taken from the firmware"
         );
     }
@@ -165,6 +197,8 @@ impl Profile {
             ramp_angle_deg,
             accel_mm_s2,
             junction_deviation_mm,
+            z_max_feed,
+            z_accel_mm_s2,
         } = *over;
 
         set(&mut self.field.width_mm, width_mm);
@@ -192,6 +226,8 @@ impl Profile {
         set(&mut self.plan.ramp_angle_deg, ramp_angle_deg);
         set(&mut self.accel_mm_s2, accel_mm_s2);
         set(&mut self.junction_deviation_mm, junction_deviation_mm);
+        set(&mut self.z_max_feed, z_max_feed);
+        set(&mut self.z_accel_mm_s2, z_accel_mm_s2);
     }
 
     /// The firmware settings this profile wants that the board does not
@@ -215,6 +251,14 @@ impl Profile {
                 grbl::JUNCTION_DEVIATION,
                 self.junction_deviation_mm,
             ),
+            (
+                // Every other entry is already a `f64`; the feed is the one
+                // setting plotly keeps in whole mm/min.
+                over.z_max_feed.map(f64::from),
+                grbl::MAX_RATE_Z,
+                f64::from(self.z_max_feed),
+            ),
+            (over.z_accel_mm_s2, grbl::ACCEL_Z, self.z_accel_mm_s2),
         ];
         wanted
             .into_iter()
@@ -228,11 +272,12 @@ impl Profile {
             .collect()
     }
 
-    /// Hold every XY feed at or below [`Profile::max_feed`].
+    /// Hold every XY feed at or below [`Profile::max_feed`], and the pen's Z
+    /// feed at or below [`Profile::z_max_feed`].
     ///
-    /// The Z feed is left alone: it belongs to a different axis with its own
-    /// limit (`$112`), and clamping it to an XY figure would only slow the pen
-    /// down for no reason.
+    /// The two ceilings are separate on purpose: the Z axis has its own limit
+    /// (`$112`, which on our machine is 15000 against XY's 12000), and
+    /// clamping the pen to an XY figure would only slow it down for no reason.
     pub fn clamp_feeds(&mut self) {
         for feed in [
             &mut self.plan.draw_feed,
@@ -251,6 +296,18 @@ impl Profile {
         // The pen's XY feed is what a Z move restores afterwards (§2.2), so it
         // is an XY feed too.
         self.pen.xy_feed = self.pen.xy_feed.min(self.max_feed);
+        // The Z feed has its own ceiling, `$112`, and now that the profile
+        // carries it there is no reason to let a config ask past it: Grbl
+        // would clamp it silently and the log would still claim the number
+        // that was asked for.
+        if self.pen.z_feed > self.z_max_feed {
+            tracing::warn!(
+                asked = self.pen.z_feed,
+                z_max_feed = self.z_max_feed,
+                "pen Z feed above the machine limit; clamped"
+            );
+            self.pen.z_feed = self.z_max_feed;
+        }
         // A ramp above the drawing feed would speed the ends *up*, which is the
         // opposite of the point.
         self.plan.ramp_feed = self.plan.ramp_feed.min(self.plan.draw_feed);
@@ -345,6 +402,8 @@ pub fn resolve(
         travel_feed = profile.plan.travel_feed,
         accel_mm_s2 = profile.accel_mm_s2,
         junction_deviation_mm = profile.junction_deviation_mm,
+        z_accel_mm_s2 = profile.z_accel_mm_s2,
+        z_max_feed = profile.z_max_feed,
         pen_down_z = profile.pen.down_z,
         pen_up_z = profile.pen.up_z,
         // How far the tip actually rises. Logged because "the pen is up" is an
@@ -569,6 +628,21 @@ mod tests {
         assert_eq!(asked.pen.settle_up_secs, 0.05);
     }
 
+    #[test]
+    fn a_pen_z_feed_past_the_machine_limit_is_clamped_to_it() {
+        let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        profile.apply_reported(&reported(&[(112, 9000.0)]));
+        profile.apply_override(&ProfileOverride {
+            pen_z_feed: Some(14_000),
+            ..Default::default()
+        });
+        profile.clamp_feeds();
+        assert_eq!(profile.z_max_feed, 9000);
+        assert_eq!(profile.pen.z_feed, 9000);
+    }
+
+    /// The pen axis is faster than XY on this machine (`$112` = 15000 against
+    /// `$111` = 12000), so the XY ceiling must not touch it.
     #[test]
     fn clamping_leaves_the_pens_z_feed_alone() {
         let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
