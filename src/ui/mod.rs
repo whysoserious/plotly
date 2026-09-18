@@ -12,14 +12,29 @@ use crate::app::App;
 /// Seconds as `m:ss`, or `h:mm:ss` once there is an hour to show — an A0 plot
 /// runs for hours, and `128:07` is not a time anyone reads at a glance.
 ///
-/// Lives here rather than in a panel because the status bar, the finished-plan
-/// note and the estimate all have to spell a duration the same way.
+/// Lives here rather than in a panel because the status bar and the estimate
+/// beside it have to spell a duration the same way. The note a finished plan
+/// leaves behind uses [`fmt_duration`] instead — it is read without them.
 pub(crate) fn fmt_time(secs: f64) -> String {
     let secs = secs.max(0.0).round() as u64;
     let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
     match h {
         0 => format!("{m}:{s:02}"),
         h => format!("{h}:{m:02}:{s:02}"),
+    }
+}
+
+/// Seconds spelled out as `1h 23m 45s` — the shape a finished plot's note
+/// wants. That note is read on its own, minutes after the fact, with no live
+/// counter beside it to say what the fields mean, so it names its units
+/// instead of leaning on the clock punctuation [`fmt_time`] uses.
+pub(crate) fn fmt_duration(secs: f64) -> String {
+    let secs = secs.max(0.0).round() as u64;
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    match (h, m) {
+        (0, 0) => format!("{s}s"),
+        (0, m) => format!("{m}m {s}s"),
+        (h, m) => format!("{h}h {m}m {s}s"),
     }
 }
 
@@ -122,6 +137,18 @@ mod tests {
     #[test]
     fn the_list_switched_off_leaves_the_row_alone() {
         assert_eq!(split_canvas_row(Rect::new(0, 3, 200, 20), false), None);
+    }
+
+    #[test]
+    fn a_spelled_out_duration_drops_the_fields_it_does_not_need() {
+        assert_eq!(fmt_duration(0.0), "0s");
+        assert_eq!(fmt_duration(45.4), "45s");
+        assert_eq!(fmt_duration(59.6), "1m 0s");
+        assert_eq!(fmt_duration(3599.0), "59m 59s");
+        assert_eq!(fmt_duration(3600.0), "1h 0m 0s");
+        assert_eq!(fmt_duration(7687.0), "2h 8m 7s");
+        // A negative duration is nonsense, not a panic.
+        assert_eq!(fmt_duration(-5.0), "0s");
     }
 
     #[test]

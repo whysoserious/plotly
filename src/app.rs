@@ -284,7 +284,7 @@ impl App {
                     // origin from where the head is (§2.4 C), and once the
                     // carriage can be pushed by hand that is only true until
                     // somebody pushes it. `h` re-establishes it.
-                    let time = ui::fmt_time(elapsed_secs);
+                    let time = ui::fmt_duration(elapsed_secs);
                     self.note = Some(if motors_released {
                         format!("done in {time} - motors released, home (h) before the next plot")
                     } else {
