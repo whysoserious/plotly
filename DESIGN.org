@@ -256,7 +256,8 @@ sprawdziłem jedynego parametru, który okazał się sprawcą.
 Winna była *bariera po wylądowaniu*, i to wina naszego kodu. Nie kupowała nic: Grbl wykonuje
 bloki po kolei, więc ruch XY i tak rusza dopiero po ruchu Z — czekaliśmy na ~ok~, żeby
 dowiedzieć się o kolejności, którą firmware gwarantuje. *Barierę po ruchu Z wysyłamy tylko
-wtedy, gdy settle jej zażąda*, a settle jest rozdzielony: ~pen_settle_up_secs = 0.05~ (bezruch
+wtedy, gdy settle jej zażąda*, a settle jest rozdzielony: ~pen_settle_up_secs = 0.05~ /(od
+2026-09-18 domyślnie ~0.0~ — patrz 2.10)/ (bezruch
 w powietrzu kosztuje czas), ~pen_settle_down_secs = 0~ (bezruch na papierze kosztuje tusz).
 Referencja dzieli to tak samo (~pen_delay_up~ / ~pen_delay_down~). Zysk: ~31 minut na
 ~example.svg~.
@@ -279,6 +280,11 @@ w konfiguracji.
 Dwie rzeczy nieoczywiste: *ruchy pióra to ~40% wydruku*, a *~draw_feed~ nie wpływa na czas
 w ogóle* — rysowanie jest ograniczone przyspieszeniem, nie prędkością, więc na odcinkach
 hatcha maszyna nie zdąża rozpędzić się do zadanego feedu.
+
+/Sprostowanie (2026-09-18), drugie i ostateczne:/ *to zdanie o ~draw_feed~ jest po prostu
+nieprawdziwe*, w obie strony. 2.5 poprawiło już kierunek „w dół"; drabinka z *2.10a* pokazuje
+±24 min na ±1000 mm/min. Tabela wyżej też jest nieaktualna — powstała przed rampą i przed
+członem bariery w estymatorze; aktualne liczby są w *2.10*.
 
 *Rampa (~ramp_mm~ / ~ramp_feed~)* — rozbieg i wybieg kreski przy niższym feedzie — powstała pod
 hipotezę prędkościową i *nie jest już potrzebna* (~ramp_mm = 0~). Zostaje w planie, bo jest
@@ -303,6 +309,86 @@ jednym arkuszu*, tym samym piórem, w tej samej minucie, i pytamy, *który rząd
 Drabinka rozstrzygnęła w jednym wydruku to, czego dwadzieścia pojedynczych kartek nie
 rozstrzygnęło. Narzędzia: ~fence --ladder~ (feed), ~--zladder~ (docisk), ~--dip~ (sam ruch Z),
 ~--pen~ (próbkowanie osi), ~hook-test.svg~ (rozdzielenie zakończeń kreski).
+
+** 2.10 Prędkość: skąd wzięła się różnica wobec referencji (2026-09-18)
+*Pytanie użytkownika:* „oryginalny firmware jest tak wykalibrowany, że wydruk jest znacznie
+szybszy". Firmware okazał się niewinny — *płytka jest u obu taka sama i nikt jej nie
+przestawia*. Fabrycznie (~$$~, 15.1): ~$110=15000~ ~$111=12000~ ~$112=15000~
+~$120=$121=$122=3000~ ~$11=0.010~. Referencja *nie zapisuje żadnego z nich*, a plotly tylko to,
+co config nazwie po imieniu. Różnica była więc po naszej stronie.
+
+*Co naprawdę robi referencja na drucie* (~drawcore_motion.doXYMove~, ~dripfeed.feed_sm~,
+~idraw2_0_conf~): ~G1G91X..Y..~ *bez ~F~*, na modalnym feedzie ustawionym przy ruchu pióra;
+~speed_pendown = 2000~, ~speed_penup = 8000~ — *dokładnie nasze liczby*; pióro to
+~G1G90 Z..F5000~ + ~G1 F<feed>~ i *nic więcej*: ani bariery, ani ~G4~, ani czekania hosta.
+~pen_delay_up = pen_delay_down = 0~. Planer trajektorii liczony na hoście jest *wyrzucany* —
+~doXYMove~ ignoruje ~move_time~ — więc rozpędzaniem i tak zarządza Grbl. Segmenty referencji są
+*krótsze* od naszych (time slice 25 ms ≈ 0,8 mm wobec ~max_segment_mm = 5.0~), co zamyka
+podejrzenie, że to nasze cięcie na 5 mm kosztuje.
+
+*Zostały trzy nasze koszty.* Policzone z ~-vv~ (stempel mikrosekundowy, ~plotly.log~
+z 2026-09-02), na jednym kształcie 40 mm kreski + 40 mm dojazdu:
+| ~G4 P0.01~ (drain przed ruchem Z) | podłoga *50 ms* ×2 na kształt |
+| ~G4 P<settle>~ (bariera za ruchem Z) | podłoga *50 ms* ×2 na kształt |
+| sam ruch Z 4,5 mm | *240 ms* ×2 na kształt |
+| ~settle_up = 0.05~ | 50 ms na kształt |
+Cztery ~G4~ na kształt to *21 minut* na ~example.svg~ (6312 kształtów) — ale gorsze od podłogi
+jest to, że *każda z nich opróżnia planer*: maszyna staje na zero między kreską a dojazdem
+i czeka na round trip hosta (5–6 ms na linię). Referencja nie staje ani razu. *To jest cała
+„kalibracja", której szukaliśmy* — nie ustawienie płytki, tylko nasze bariery.
+
+*Zmienione domyślne* (wszystkie w stronę referencji), ~example.svg~, estymator:
+| ~pen_fence~ | ~"dwell"~ → ~"off"~ | *−21 min*; decyzja była już zapisana w 2.7, brakowało jej w kodzie |
+| ~pen_settle_up_secs~ | ~0.05~ → ~0.0~ | *−5 min*; ubezpieczenie od kołysania pióra, którego *nikt nigdy nie zmierzył*, a para „dwell vs off" z 2.7 przejechała całą stronę „off" bez settle i wyszła nie do odróżnienia |
+| ~travel_feed~ | ~8000~ → ~12000~ | *−5 min*; wolniejszy z ~$110~/~$111~ naszej maszyny, a na papierze prędkość dojazdu nie zmienia nic (2.5) |
+Razem *2:31:43 → 2:00:40*, jedna piąta wydruku. Po tych zmianach plotly nie robi już nic
+wolniej od referencji *poza rampą* (−7 min), której referencja nie ma i która jest jedyną
+rzeczą między tym ploterem a 2-milimetrowym haczykiem na każdym końcu kreski (2.5).
+
+*Estymator dostał człon bariery.* Bez niego ~Machine::from_profile~ nie widziało ~pen_fence~
+w ogóle — ~est~ w statusie pokazywało to samo przy każdym ustawieniu *najdroższego pokrętła na
+liście*, czyli było gorsze niż brak liczby. Teraz ~fence_secs~: ~"dwell"~ 0,100 s na ruch pióra
+(dwie ~G4~ po zmierzonej podłodze 50 ms), ~"poll"~ 0,020 s, ~"off"~ 0.
+
+** 2.10a ~draw_feed~ jednak *bardzo* wpływa na czas — i to w obie strony
+*Sprostowanie do 2.8*, które mówi „~draw_feed~ nie wpływa na czas w ogóle, bo rysowanie jest
+ograniczone przyspieszeniem". 2.5 poprawiło to już raz („w dół kosztuje bardzo dużo"), ale
+w górę nadal stało. Drabinka estymatorem na ~example.svg~ od nowych domyślnych (baza 2:00:40):
+| F1000 | 3:13:08 | +72 min |
+| F1500 | 2:25:06 | +24 min |
+| *F2000* | *2:00:40* | — |
+| F2500 | 1:46:07 | −15 min |
+| F3000 | 1:36:30 | *−24 min* |
+| F4000 | 1:24:42 | −36 min |
+Kierunek „w dół" zgadza się z jedynym pomiarem zegarem, jaki mamy (2.5: F1000 wszędzie
+kosztuje +80 min wobec +72 min tutaj), więc kierunkowi „w górę" też można wierzyć.
+*To jest największe pojedyncze pokrętło na liście*, większe niż wszystkie zmiany domyślnych
+razem wzięte.
+
+*Dlaczego mimo to zostaje 2000.* Bo cena jest w tuszu, nie w czasie: 2.5 zmierzyło, że F1200
+i F1400 hakują. *Ale ta bisekcja szła bez rampy*, a rampa to dokładnie te miejsca, gdzie haczyk
+powstaje. Czy F3000 *z rampą* jest czyste — ❓ *nigdy nie było na papierze*, i sondy na to nie
+ma: ~fence --ladder~ jedzie każdy rząd stałym feedem bez rampy (czyli odpowiada na stare
+pytanie), a ~--rampladder~ ma rampę, ale drabinkuje długość rozbiegu, nie feed. *Brakuje jednej
+kartki:* jeden zrampowany wężyk na ~draw_feed~, rzędy 2000/2500/3000/4000, pytanie „który rząd
+jest ostatnim czystym" — dokładnie metoda z 2.9. Do tego czasu 2000 (tyle co referencja).
+
+** 2.10b Co zmierzono i wyszło zero
+Warto, bo obie rzeczy wyglądają na pokrętła prędkości:
+- ~junction_deviation_mm~ (~$11~): *0,0 min* na ~example.svg~, przy rampie i bez niej. Hatch
+  z vpype zawraca o 180° na końcu każdego przejścia, a *żadna tolerancja rogu nie przenosi
+  prędkości przez zawrót*. Na rysunku ze spłaszczonych krzywych miałoby znaczenie.
+- ~max_segment_mm~: *0,0 min* w obie strony (1 mm i 20 mm). Płytka odpowiada ~6 ms na linię
+  i trzyma 15 bloków, więc nawet przy 1 mm to więcej look-aheadu, niż głowica zdąży zjeść.
+
+*Czego świadomie NIE zrobiono:* łączenia ścieżek przy mikroskopijnych przerwach
+(~min_gap = 0.008 in~ w referencji) i reorderu — to krok *5.2*, *odpuszczony*, bo użytkownik
+robi jedno i drugie w vpype przed wczytaniem pliku.
+
+*Jak sprawdzić bez sprzętu:* ~cargo run -- --simulate rysunek.svg~ i odczytać ~est~ ze statusu;
+~grep "machine profile" plotly.log | tail -1~ mówi, co faktycznie obowiązuje. Uwaga: estymata
+biegnie ~12% optymistycznie wobec jedynego zegara, jaki mamy (2:31:43 wobec zmierzonych
+2:51:54), i winny jest znany człon ruchu pióra z 2.6.
 
 * 3. Funkcje
 ** 3.1 MVP
@@ -850,8 +936,15 @@ Niepoprawny TOML zatrzymuje start z komunikatem i ścieżką, zanim wejdzie TUI.
 pen_down_z = 5.4      # kalibracja pod konkretne pióro/podłoże (15.3)
 draw_feed  = 1500
 #+end_example
-Klucze: ~width_mm~, ~height_mm~, ~pen_up_z~, ~pen_down_z~, ~pen_z_feed~, ~draw_feed~,
-~travel_feed~, ~jog_feed~, ~max_feed~, ~max_segment_mm~.
+Klucze: ~width_mm~, ~height_mm~, ~pen_up_z~, ~pen_down_z~, ~pen_z_feed~,
+~pen_settle_up_secs~, ~pen_settle_down_secs~, ~pen_fence~, ~draw_feed~, ~travel_feed~,
+~jog_feed~, ~max_feed~, ~max_segment_mm~, ~ramp_mm~, ~ramp_feed~, ~ramp_angle_deg~ oraz
+*dwa pisane do EEPROM płytki*: ~accel_mm_s2~ (~$120~/~$121~) i ~junction_deviation_mm~
+(~$11~).
+
+*Pełna, anotowana lista z wartościami domyślnymi i kosztem każdego pokrętła w minutach jest
+w ~default.conf~ w korzeniu repo* — plik jest dokumentacją, plotly go nie czyta, a test
+~the_annotated_defaults_document_every_option~ pilnuje, żeby nie odstawał od struktury.
 
 * 11. Stack technologiczny
 | Warstwa | Crate | Dlaczego |

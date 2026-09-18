@@ -131,6 +131,12 @@ pub struct PlanSettings {
     /// Feed while drawing (pen down), mm/min.
     pub draw_feed: u32,
     /// Feed while travelling (pen up), mm/min.
+    ///
+    /// Nothing on the paper depends on it — bisected at 300 and at 8000 with
+    /// everything else held, the marks were the same (§2.5) — so it wants to
+    /// be whatever the machine allows. The default is our A0's own `$111`,
+    /// and [`crate::profiles::Profile::clamp_feeds`] holds it to whatever the
+    /// board in the room reports.
     pub travel_feed: u32,
     /// How much of each end of a stroke to draw slowly, mm. Zero disables the
     /// ramp and every stroke runs at [`PlanSettings::draw_feed`] throughout.
@@ -155,7 +161,11 @@ impl Default for PlanSettings {
         Self {
             max_segment_mm: 5.0,
             draw_feed: 2000,
-            travel_feed: 8000,
+            // The slower of our machine's `$110`/`$111` (15000 / 12000), which
+            // is also `max_feed`: travel is dead time and the marks do not
+            // care how fast it happens. The reference driver settles for 8000
+            // (§2.10).
+            travel_feed: 12000,
             // Half a millimetre is about the size of the artefact: the nib's
             // own deflection plus the 0.18 mm the machine needs to stop from
             // `draw_feed` at `$120 = 3000`. Longer costs real time for nothing
@@ -682,7 +692,7 @@ mod tests {
             draw_feed: 2000,
             ..PlanSettings::default()
         };
-        assert_eq!(stroke_feeds(40.0, &settings), vec![300, 2000, 300, 8000]);
+        assert_eq!(stroke_feeds(40.0, &settings), vec![300, 2000, 300, 12000]);
 
         let plan = Plan::build(
             &[vec![Point::new(0.0, 0.0), Point::new(40.0, 0.0)]],
@@ -709,7 +719,7 @@ mod tests {
             ramp_feed: 300,
             ..PlanSettings::default()
         };
-        assert_eq!(stroke_feeds(3.0, &settings), vec![300, 8000]);
+        assert_eq!(stroke_feeds(3.0, &settings), vec![300, 12000]);
     }
 
     /// Zero turns the ramp off: one feed for the whole stroke, as before.
@@ -720,7 +730,7 @@ mod tests {
             draw_feed: 2000,
             ..PlanSettings::default()
         };
-        assert_eq!(stroke_feeds(40.0, &settings), vec![2000, 8000]);
+        assert_eq!(stroke_feeds(40.0, &settings), vec![2000, 12000]);
     }
 
     /// A vpype hatch is one long stroke whose every turn is interior, so
@@ -750,7 +760,11 @@ mod tests {
             })
             .collect();
         // Slow in, fast, slow through the turn, fast, slow out, then travel.
-        assert_eq!(feeds, vec![1000, 2000, 1000, 2000, 1000, 8000], "{feeds:?}");
+        assert_eq!(
+            feeds,
+            vec![1000, 2000, 1000, 2000, 1000, 12000],
+            "{feeds:?}"
+        );
     }
 
     /// Corners gentle enough not to unload the nib are left alone, or a
@@ -778,7 +792,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(feeds, vec![1000, 2000, 1000, 8000], "{feeds:?}");
+        assert_eq!(feeds, vec![1000, 2000, 1000, 12000], "{feeds:?}");
     }
 
     #[test]

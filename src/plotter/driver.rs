@@ -43,9 +43,18 @@ const POLL_WINDOW: Duration = Duration::from_millis(80);
 /// drawing a hook.
 const IDLE_STREAK: usize = 3;
 
-/// Default [`PenSettings::settle_up_secs`]. A guess, and the one pen number
-/// with no firmware setting behind it; the time estimate assumes the same.
-const DEFAULT_SETTLE_UP_SECS: f64 = 0.05;
+/// Default [`PenSettings::settle_up_secs`] — *zero*, like the landing one.
+///
+/// It shipped at 0.05 s as insurance against the pen swinging after a lift.
+/// Nothing ever measured that swing, and the paired print that retired the
+/// fence (§2.7) ran the whole "off" side with no settle at all and came out
+/// indistinguishable — so the insurance has no claim behind it and costs
+/// 50 ms per shape, five minutes on a 6312-shape drawing. The reference
+/// driver also ships its `pen_delay_up` at zero (§2.10).
+///
+/// Raise it in the config if a pen turns out to need it; the knob still works
+/// under every fence.
+const DEFAULT_SETTLE_UP_SECS: f64 = 0.0;
 
 /// Default [`PenSettings::settle_down_secs`] — *zero*, deliberately.
 ///
@@ -82,21 +91,33 @@ impl std::fmt::Display for Pen {
 
 /// How a pen move is fenced off from the XY motion around it (§2.5).
 ///
-/// `ok` means "queued", not "drawn", so without a fence Grbl's look-ahead
-/// carries speed through the corner between the last drawn segment and the Z
-/// move, and the pen draws a hook as it lifts. The fence is whatever makes the
-/// host wait for the motion to be *over* — and which of these actually does
-/// that on DrawCore is a question for the machine, not for us:
-/// `cargo run --example fence` asks it.
+/// `ok` means "queued", not "drawn", so a fence is whatever makes the host
+/// wait for the motion to be *over* before the Z move goes out. It was put in
+/// on the theory that without it Grbl's look-ahead carries speed through the
+/// corner between the last drawn segment and the Z move, and the pen draws a
+/// hook as it lifts.
+///
+/// The theory did not survive being measured: a paired print of `Dwell`
+/// against `Off`, same pen, same paper, same hour, came out indistinguishable
+/// (§2.7). So the fence buys nothing on this machine and costs `G4`'s 50 ms
+/// floor four times per shape — about twenty minutes on a 6312-shape drawing —
+/// and, worse, it empties the planner twice per shape, which is what stops the
+/// machine streaming the way the reference driver does (§2.10). Hence the
+/// default below.
+///
+/// The switch stays because the measurement is about *this* pen on *this*
+/// machine. `cargo run --example fence` is what asked the board in the first
+/// place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PenFence {
-    /// No fence: the Z move joins the planner queue like any other block.
-    /// Fastest, and what the machine did before 2026-09-02.
+    /// No fence: the Z move joins the planner queue like any other block, so
+    /// the host never waits and the machine never runs dry. Fastest, what the
+    /// reference driver does, and — since the paired print above — the default.
+    #[default]
     Off,
     /// `G4` dwells around the Z move. Grbl runs a dwell only once the planner
     /// buffer has emptied — *if* the firmware implements it that way.
-    #[default]
     Dwell,
     /// Poll `?` until the machine reports `Idle`. Slower per pen move than a
     /// dwell, but it asks about the state rather than trusting a side effect.
@@ -534,42 +555,39 @@ impl Driver {
         self.pen = Pen::Up;
     }
 
-    /// Move the pen to `target`, fenced off from the XY motion around it, then
-    /// restore the XY feed rate.
+    /// Move the pen to `target`, fenced off from the XY motion around it as the
+    /// profile asks, then restore the XY feed rate.
     ///
-    /// The fences are the point. `ok` means "queued" (§15.1), so on their own
-    /// the four lines below just join the planner's queue, and Grbl's
-    /// look-ahead then carries speed *through* the corner between the last
-    /// drawn segment and the Z move — junction deviation `$11` = 0.010 mm at
-    /// `$120` = 3000 mm/s² is about 8 mm/s, taken instantly sideways. The
-    /// machine cannot turn that sharply: belts and pen holder flex, and the
-    /// tip draws a small hook towards wherever it goes next while it is still
-    /// on the paper. The same happens in reverse at pen-down, as a tick at the
-    /// start of the stroke.
+    /// The fences were once the point of this function, and the argument for
+    /// them was good: `ok` means "queued" (§15.1), so the lines below merely
+    /// join the planner's queue, and Grbl's look-ahead then carries speed
+    /// *through* the corner between the last drawn segment and the Z move —
+    /// junction deviation `$11` = 0.010 mm at `$120` = 3000 mm/s² is about
+    /// 8 mm/s, taken instantly sideways. Belts and pen holder flex, so the tip
+    /// should draw a small hook towards wherever it goes next while it is
+    /// still on the paper, and a mirror image of it at the landing.
     ///
-    /// So the order the operator expects — finish the line, *then* lift, *then*
-    /// travel — has to be asked for. `G4` is how: Grbl runs a dwell only once
-    /// the planner buffer has emptied (measured: it held 4.336 s for a 4.0 s
-    /// move, §2.5), which makes the one *before* the Z move a "the line is
-    /// really drawn" barrier.
+    /// `G4` is how one asks for the order the operator expects — finish the
+    /// line, *then* lift, *then* travel. Grbl runs a dwell only once the
+    /// planner buffer has emptied (measured: it held 4.336 s for a 4.0 s move,
+    /// §2.5), which makes the one *before* the Z move a "the line is really
+    /// drawn" barrier and the one *after* it a "the pen has landed at a
+    /// standstill" barrier.
     ///
-    /// The barrier *after* the Z move is not about ordering — Grbl runs queued
-    /// blocks in order, and sampling the axes at 6 ms found no overlap at all
-    /// (§2.10). It is about the *velocity the pen lands with*. Without it, the
-    /// planner joins the Z block to the XY block that follows and the head
-    /// leaves that junction already moving: the tip touches down with sideways
-    /// speed and drags a hook into the start of the stroke. With it, the
-    /// machine reaches a standstill first and the pen lands still.
+    /// **None of it showed up on paper.** A paired print, `Dwell` against
+    /// `Off`, same pen and paper within the same hour, came out
+    /// indistinguishable (§2.7) — and the real cause of the hooks turned out
+    /// to be the drawing feed, which the ramp handles instead (§2.5). What the
+    /// fence does cost is four `G4` floors of 50 ms per shape and, worse, two
+    /// emptied planner buffers per shape: the machine stops dead between every
+    /// stroke and travel while the host takes a round trip to notice (§2.10).
+    /// So the default is [`PenFence::Off`], which is what the reference driver
+    /// has always done, and this function then sends nothing but the Z move
+    /// and the feed restore.
     ///
-    /// This is empirical and it cost a detour to learn: dropping this barrier
-    /// to save the 298 ms of stillness it caused (§2.7) brought the hooks
-    /// straight back, and only at the landing, which is exactly where the
-    /// junction is. So it goes out unconditionally — `G4 P0.000` when there is
-    /// no settle to add. What a settle buys on top is stillness, which is a
-    /// different thing and costs ink when the tip is down (§2.8).
-    ///
-    /// The final line matters too: `F` is modal in Grbl, so without it every
-    /// following XY move would inherit the fast Z feed (§2.2).
+    /// The feed restore is not optional under any fence: `F` is modal in Grbl,
+    /// so without it every following XY move would inherit the fast Z feed
+    /// (§2.2).
     fn set_pen(&mut self, target: Pen) -> Result<(), DriverError> {
         if self.pen == target {
             tracing::debug!(pen = %target, "pen already there");
@@ -583,12 +601,25 @@ impl Driver {
         match self.settings.fence {
             PenFence::Off => {
                 self.move_pen_now(target)?;
+                // A settle without a fence is still a settle: `G4` goes into
+                // the queue behind the Z move, so the *machine* holds still
+                // for it while the host carries on filling the buffer. That is
+                // the difference that matters here — the stillness costs what
+                // it says it costs, and nothing else waits for a round trip.
+                //
+                // Only when it was asked for. A zero settle would emit
+                // `G4 P0.000`, which empties the planner for nothing and is
+                // exactly the stall this variant exists to avoid.
+                if settle > 0.0 {
+                    self.dwell(settle)?;
+                }
             }
             PenFence::Dwell => {
                 self.drain()?;
                 self.move_pen_now(target)?;
-                // Always, even for a zero settle: this one is not about
-                // stillness, it is about *landing at a standstill*. See below.
+                // Always, even for a zero settle: under this fence the dwell
+                // is not the stillness, it is the barrier that makes the pen
+                // land at a standstill. Dropping it is what `"off"` is for.
                 self.dwell(settle)?;
             }
             PenFence::Poll => {

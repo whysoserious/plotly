@@ -551,13 +551,22 @@ mod tests {
         assert_eq!(profile.pen.settle_down_secs, 0.0);
     }
 
-    /// The two are not interchangeable: standing still on the paper is what
-    /// puts a dot at the start of a stroke, so the landing ships at zero.
+    /// Neither settle is on by default, and the two get there for different
+    /// reasons: standing still on the paper puts a dot at the start of a
+    /// stroke, while standing still in the air was only ever insurance
+    /// against a swing nobody measured (§2.10). Both remain settable.
     #[test]
-    fn the_pen_does_not_stand_still_on_the_paper_by_default() {
+    fn the_pen_does_not_stand_still_by_default_at_either_height() {
         let profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
         assert_eq!(profile.pen.settle_down_secs, 0.0);
-        assert!(profile.pen.settle_up_secs > 0.0);
+        assert_eq!(profile.pen.settle_up_secs, 0.0);
+
+        let mut asked = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        asked.apply_override(&ProfileOverride {
+            pen_settle_up_secs: Some(0.05),
+            ..Default::default()
+        });
+        assert_eq!(asked.pen.settle_up_secs, 0.05);
     }
 
     #[test]
