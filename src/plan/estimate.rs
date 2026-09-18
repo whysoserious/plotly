@@ -24,7 +24,26 @@
 
 use crate::geometry::Point;
 use crate::plan::{Op, Plan};
+use crate::plotter::driver::PenFence;
 use crate::profiles::Profile;
+
+/// What one pen move costs beyond the Z travel itself, per [`PenFence`].
+///
+/// A fence is pure overhead in time terms — it buys ordering, not motion —
+/// and on a hatched drawing there are two pen moves per shape, so it is worth
+/// more than it looks: 0.1 s × 2 × 6312 shapes is twenty-one minutes.
+///
+/// `Dwell` sends two `G4`s per pen move and each has a measured floor of 50 ms
+/// even with nothing to wait for (§2.6). `Poll` replaces them with `?` until
+/// the machine says `Idle`, which costs about one poll gap each way instead of
+/// the floor. `Off` sends neither.
+fn fence_secs(fence: PenFence) -> f64 {
+    match fence {
+        PenFence::Off => 0.0,
+        PenFence::Dwell => 0.100,
+        PenFence::Poll => 0.020,
+    }
+}
 
 /// The machine numbers a time estimate needs (§10).
 #[derive(Debug, Clone, Copy)]
@@ -48,13 +67,18 @@ impl Machine {
         let z_mm = (f64::from(profile.pen.down_z) - f64::from(profile.pen.up_z)).abs();
         let z_mm_s = f64::from(profile.pen.z_feed) / 60.0;
         let z_secs = if z_mm_s > 0.0 { z_mm / z_mm_s } else { 0.0 };
+        let fence = fence_secs(profile.pen.fence);
         Self {
             accel_mm_s2: profile.accel_mm_s2,
             junction_deviation_mm: profile.junction_deviation_mm,
-            // The settles are the profile's, so the estimate counts the same
-            // stillness the driver actually holds (`Driver::set_pen`).
-            pen_up_secs: z_secs + profile.pen.settle_up_secs.max(0.0),
-            pen_down_secs: z_secs + profile.pen.settle_down_secs.max(0.0),
+            // The settles and the fence are the profile's, so the estimate
+            // counts the same stillness the driver actually holds
+            // (`Driver::set_pen`). Without the fence term the estimate could
+            // not see the single most expensive pen setting there is, which
+            // made it useless for the one job it has here — telling the
+            // operator what a configuration change is going to cost.
+            pen_up_secs: z_secs + fence + profile.pen.settle_up_secs.max(0.0),
+            pen_down_secs: z_secs + fence + profile.pen.settle_down_secs.max(0.0),
         }
     }
 }
@@ -389,6 +413,29 @@ mod tests {
         assert_eq!(est.travel_mm, 0.0);
         // Only the opening pen-up.
         assert!(est.secs < 1.0, "{} s for nothing", est.secs);
+    }
+
+    /// The fence is the most expensive pen setting there is, so the estimate
+    /// has to move when it does — otherwise `est` in the status bar says the
+    /// same thing whatever the operator sets, which is worse than no number.
+    #[test]
+    fn the_pen_fence_shows_up_in_the_estimate() {
+        let plan = straight(10.0); // one landing and one lift
+        let secs = |fence| {
+            let mut profile = Profile::builtin("idraw-a0").unwrap();
+            profile.pen.fence = fence;
+            estimate(&plan, &Machine::from_profile(&profile)).secs
+        };
+        let off = secs(PenFence::Off);
+        // Two pen moves, 0.1 s of `G4` floors each.
+        assert!(
+            ((secs(PenFence::Dwell) - off) - 0.2).abs() < 1e-9,
+            "dwell {} vs off {off}",
+            secs(PenFence::Dwell)
+        );
+        // Polling costs the same shape of thing, less of it.
+        let poll = secs(PenFence::Poll);
+        assert!(poll > off && poll < secs(PenFence::Dwell), "poll {poll}");
     }
 
     #[test]
