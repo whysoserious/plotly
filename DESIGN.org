@@ -730,6 +730,33 @@ Wstrzymanie *nie* jest realtime i celowo *nie* hamuje w połowie kreski:
 - ~!~/=~= *nie są już używane* (usunięte z ~driver.rs~); fakty o nich zostają w 15.1 na wypadek,
   gdyby kiedyś potrzebne było twarde zatrzymanie w ruchu.
 
+*Pauza nie może zjadać komend (2026-09-12).* ~hold~ blokował się na ~commands.recv()~ i miał
+na końcu ~_ => {}~ — czyli *po cichu wyrzucał* wszystko poza ~Resume~/~Stop~/~EmergencyStop~/
+~Shutdown~. Skutki widać w logu z 11:20: trzy razy ~starting plot~, trzy nowe katalogi joba
+i zero ruchu karetki, bo każdy ~RunPlan~ ginął w tym ~_~. Tak samo ginęły klawisze pióra, jog
+i ~$H~ — a pauza jest dokładnie po to, żeby ich użyć. Teraz:
+- komendy ręczne (pióro, docisk, jog, ~$H~, ~$SLP~, konsola) idą przez ~run_one~ *w trakcie
+  postoju*, po czym ~Paused~ jest emitowane ponownie (pasek statusu należy do planu),
+- ~RunPlan~/~Frame~ → ~Interrupt::Handover~: plan się kończy, a worker uruchamia to, o co
+  poproszono (pętla workera ma slot ~pending~ zamiast gołego ~recv~),
+- ~Pause~ i cutoffy w postoju są bezczynne świadomie (drugi ~Pause~ nic nie wnosi, cutoffy
+  i tak uzbraja app przy następnym starcie).
+
+*~Enter~ przy wstrzymanym planie wznawia, nie zaczyna od nowa (2026-09-12).* „Narysuj wczytany
+SVG" przy piórze stojącym w połowie rysunku może znaczyć tylko „jedź dalej" — start od zera
+przejechałby całą kartkę po istniejącym tuszu i otworzył *drugi* job na ten sam rysunek.
+Chcesz od nowa: najpierw ~S~ (stop), potem ~Enter~. App trzyma na to flagę ~paused~, ustawianą
+z ~Event::Paused~ i gaszoną przez ~Busy~/~PlanDone~/~Aborted~.
+
+*Pauza nie zjada budżetu cutoffu (2026-09-12).* Zegar ~t~ ogranicza czas, przez który maszyna
+rysuje *bez nadzoru* — a pauza jest dokładnie odwrotnością „bez nadzoru": operator stoi przy
+ploterze. Wcześniej deadline biegł dalej w czasie postoju, więc pauza dłuższa niż timer
+wydawała cały budżet i wznowienie zatrzymywało się na *pierwszej* granicy op. Z fotela
+operatora: log pisze ~plan resumed~, a pióro nie rusza się nigdy więcej. Teraz czas trzymania
+(~hold~) wraca do deadline'u cutoffu *i* jest odejmowany od zegara planu — ETA po długiej
+pauzie też przestaje kłamać. Dotyczy to zegara ~t~; dystansowy ~m~ problemu nie miał, bo
+podczas postoju nic nie przejeżdża.
+
 *Cutoff, który wystrzelił, rozbraja się sam i mówi, co zrobił (2026-09-05).*
 Wydruk ~output.svg~ zatrzymywał się „bez powodu" po ~20 s (291 z 81183 op, 502 mm) — i tak samo
 po każdym restarcie. Sprawcą był *nasz własny* dystansowy cutoff: klawisz, który zamknął pytanie

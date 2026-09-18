@@ -187,7 +187,17 @@ impl Worker {
 fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>) {
     emit(events, Event::State(snapshot(&driver)));
 
-    while let Ok(command) = commands.recv() {
+    // A plan that was replaced while paused hands its successor back here, so
+    // the loop runs that instead of blocking on a `recv` it has already had.
+    let mut pending: Option<Command> = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match commands.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            },
+        };
         match command {
             Command::Shutdown => break,
             // A plan can absorb a Shutdown between ops; when it does, honour it
@@ -205,8 +215,9 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
                     commands,
                     events,
                 );
-                if flow.is_break() {
-                    break;
+                match flow {
+                    ControlFlow::Break(()) => break,
+                    ControlFlow::Continue(next) => pending = next,
                 }
             }
             // Like a plan, the frame is a long motion that must stay
@@ -288,7 +299,7 @@ fn run_plan(
     progress: Option<&ProgressWriter>,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
-) -> ControlFlow<()> {
+) -> ControlFlow<(), Option<Command>> {
     let total = plan.ops.len();
 
     // Resume: re-home to a firm origin, travel to the stop point and restore
@@ -299,7 +310,7 @@ fn run_plan(
             tracing::error!(%err, "resume preamble failed");
             emit(events, Event::Error(err.to_string()));
             emit(events, Event::State(snapshot(driver)));
-            return ControlFlow::Continue(());
+            return ControlFlow::Continue(None);
         }
     }
     emit(events, Event::Busy("drawing".to_owned()));
@@ -312,6 +323,10 @@ fn run_plan(
     let mut pause_pending = false;
     // Live metrics reported with each Progress event.
     let started = Instant::now();
+    // How long the plan has spent held at a pause. Subtracted from the clock
+    // and added back to the safety timer, because neither measures the time the
+    // operator spends standing at a stopped machine — see the hold below.
+    let mut paused_for = Duration::ZERO;
     let mut distance_mm = 0.0_f64;
 
     for (index, op) in plan.ops.iter().enumerate().skip(start_index) {
@@ -348,11 +363,16 @@ fn run_plan(
                 Interrupt::Continue => {}
                 Interrupt::Stopped => {
                     checkpoint(progress, index, total, driver);
-                    return ControlFlow::Continue(());
+                    return ControlFlow::Continue(None);
                 }
                 Interrupt::Shutdown => {
                     checkpoint(progress, index, total, driver);
                     return ControlFlow::Break(());
+                }
+                // `handle_interrupt` never hands over; only a hold does.
+                Interrupt::Handover(command) => {
+                    checkpoint(progress, index, total, driver);
+                    return ControlFlow::Continue(Some(*command));
                 }
             },
             Err(TryRecvError::Disconnected) => {
@@ -369,12 +389,25 @@ fn run_plan(
         // before anything stops (user request; §9).
         if pause_pending && driver.pen() == Pen::Up {
             pause_pending = false;
+            let held = Instant::now();
             // `hold` writes its own, exact checkpoint; checkpointing again on
             // the way out would only push the committed index back.
             match hold(driver, index, total, progress, commands, events) {
                 Interrupt::Continue => {}
-                Interrupt::Stopped => return ControlFlow::Continue(()),
+                Interrupt::Stopped => return ControlFlow::Continue(None),
                 Interrupt::Shutdown => return ControlFlow::Break(()),
+                Interrupt::Handover(command) => return ControlFlow::Continue(Some(*command)),
+            }
+            // Time at a paused machine is not drawing time, and the safety
+            // cutoff exists to bound how long the machine draws *unattended*
+            // (§9) — a pause is the opposite of unattended. Without giving the
+            // budget back, any pause longer than the timer spends it whole, and
+            // the resume then stops on its very first boundary: the log says
+            // the plan resumed and the pen never moves again.
+            let held = held.elapsed();
+            paused_for += held;
+            if let Some((deadline, _)) = cutoff.as_mut() {
+                *deadline += held;
             }
         }
 
@@ -383,14 +416,14 @@ fn run_plan(
             tracing::info!(done = index, pen_up, "timed stop");
             stop_plan(driver, events, pen_up, StopCause::Timer);
             checkpoint(progress, index, total, driver);
-            return ControlFlow::Continue(());
+            return ControlFlow::Continue(None);
         }
         if let Some((budget, pen_up)) = distance_cutoff {
             if distance_mm >= budget {
                 tracing::info!(done = index, distance_mm, pen_up, "distance stop");
                 stop_plan(driver, events, pen_up, StopCause::Distance);
                 checkpoint(progress, index, total, driver);
-                return ControlFlow::Continue(());
+                return ControlFlow::Continue(None);
             }
         }
 
@@ -400,7 +433,7 @@ fn run_plan(
             emit(events, Event::Error(err.to_string()));
             abort(driver, events);
             checkpoint(progress, index, total, driver);
-            return ControlFlow::Continue(());
+            return ControlFlow::Continue(None);
         }
         let after = driver.position();
         distance_mm += (after.x - before.x).hypot(after.y - before.y);
@@ -412,13 +445,13 @@ fn run_plan(
                 done: sent,
                 total,
                 distance_mm,
-                elapsed_secs: started.elapsed().as_secs_f64(),
+                elapsed_secs: started.elapsed().saturating_sub(paused_for).as_secs_f64(),
             },
         );
         checkpoint(progress, sent, total, driver);
     }
 
-    let elapsed_secs = started.elapsed().as_secs_f64();
+    let elapsed_secs = started.elapsed().saturating_sub(paused_for).as_secs_f64();
     tracing::info!(ops = total, secs = elapsed_secs, "plan done");
     if let Some(writer) = progress {
         let pos = driver.position();
@@ -429,7 +462,7 @@ fn run_plan(
 
     emit(events, Event::PlanDone { elapsed_secs });
     emit(events, Event::State(snapshot(driver)));
-    ControlFlow::Continue(())
+    ControlFlow::Continue(None)
 }
 
 /// Trace `outline` with the pen up: the frame that shows where a drawing will
@@ -462,6 +495,8 @@ fn run_frame(
                 Interrupt::Continue => {}
                 Interrupt::Stopped => return ControlFlow::Continue(()),
                 Interrupt::Shutdown => return ControlFlow::Break(()),
+                // A frame never pauses, so nothing can hand over out of one.
+                Interrupt::Handover(_) => return ControlFlow::Continue(()),
             },
             Err(TryRecvError::Disconnected) => return ControlFlow::Break(()),
             Err(TryRecvError::Empty) => {}
@@ -580,6 +615,9 @@ enum Interrupt {
     Stopped,
     /// End the worker thread.
     Shutdown,
+    /// Abandon this plan and let the worker loop run this command instead.
+    /// Boxed because `Command` carries a whole `Plan`.
+    Handover(Box<Command>),
 }
 
 /// Act on a command that arrived between ops. Pause is not handled here — it
@@ -657,8 +695,29 @@ fn hold(
                 abort(driver, events);
                 return Interrupt::Shutdown;
             }
-            // Ignore anything else (including a second Pause) while held.
-            _ => {}
+            // A plan or a frame asked for while held ends the pause and is run
+            // by the worker loop instead. Dropping it here is what made
+            // `enter` at a paused machine do nothing at all: the app said
+            // "starting plot" and opened a job, and the command died in this
+            // match while the carriage stood still.
+            command @ (Command::RunPlan { .. } | Command::Frame { .. }) => {
+                tracing::info!(done, total, "paused plan replaced by a new one");
+                return Interrupt::Handover(Box::new(command));
+            }
+            // A second Pause is already satisfied; the cutoffs belong to the
+            // plan that is held and are re-armed by the app on the next start.
+            Command::Pause | Command::StopAfter { .. } | Command::StopAfterDistance { .. } => {}
+            // Everything else is manual machine control, and a pause is
+            // exactly when the operator reaches for it — change the pen, jog
+            // clear of the paper, look at a raw reply. Held commands used to
+            // vanish here, which read as a dead keyboard.
+            manual => {
+                run_one(driver, manual, events);
+                emit(events, Event::State(snapshot(driver)));
+                // The status line is owned by the plan while it runs, so say
+                // again that we are still holding.
+                emit(events, Event::Paused { done, total });
+            }
         }
     }
     // Channel closed while paused.
@@ -747,6 +806,72 @@ mod tests {
         assert_eq!(
             cutoff_fired(Some((past, false)), Instant::now()),
             Some(false)
+        );
+    }
+
+    /// A pause must not spend the safety timer. The timer bounds how long the
+    /// machine draws unattended; time the operator spends at the paused machine
+    /// is not drawing time. Before the fix, a pause longer than the timer made
+    /// the resume stop instantly — the log said "plan resumed" and the pen
+    /// never moved again.
+    #[test]
+    fn a_pause_does_not_spend_the_safety_timer() {
+        use crate::geometry::{Placement, Point};
+        use crate::plan::{Plan, PlanSettings};
+        use crate::plotter::mock::MockTransport;
+        use crate::plotter::Connection;
+
+        let strokes: Vec<Vec<Point>> = (0..40)
+            .map(|i| {
+                let y = f64::from(i);
+                vec![Point::new(0.0, y), Point::new(10.0, y)]
+            })
+            .collect();
+        let plan = Plan::build(&strokes, &Placement::identity(), &PlanSettings::default());
+
+        let mock = MockTransport::with_read_delay(Duration::from_millis(2));
+        let sent = mock.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(mock),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+
+        worker.send(Command::RunPlan {
+            plan,
+            progress: None,
+            start_index: 0,
+        });
+        // A generous budget of *drawing* time, then pause for longer than it.
+        worker.send(Command::StopAfter {
+            after: Duration::from_millis(300),
+            pen_up: true,
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        worker.send(Command::Pause);
+
+        let mut paused = false;
+        for _ in 0..400 {
+            if let Some(Event::Paused { .. }) = worker.recv_timeout(Duration::from_millis(50)) {
+                paused = true;
+                break;
+            }
+        }
+        assert!(paused, "the plan never paused");
+
+        // Stand at the machine for longer than the timer's whole budget.
+        std::thread::sleep(Duration::from_millis(600));
+        let at_pause = sent.lock().unwrap().len();
+
+        worker.send(Command::Resume);
+        std::thread::sleep(Duration::from_millis(200));
+        let after_resume = sent.lock().unwrap().len();
+
+        assert!(
+            after_resume > at_pause,
+            "the pause spent the timer: resume stopped the plan instantly at \
+             {at_pause} lines"
         );
     }
 }

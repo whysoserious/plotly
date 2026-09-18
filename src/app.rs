@@ -82,6 +82,10 @@ pub struct App {
     /// A pause was asked for and the plot is drawing out the current shape
     /// before it takes hold, for the status bar.
     pausing: bool,
+    /// The plan is held at a pause, pen up. `enter` means "get going again"
+    /// here rather than "start a plot", so the half-drawn sheet is not drawn
+    /// over from the top.
+    paused: bool,
     /// The machine this run is driving: field, feeds, pen heights (§10).
     profile: Profile,
     /// The loaded drawing in drawing-logical mm, before placement. Kept so the
@@ -156,6 +160,7 @@ impl App {
             job: None,
             resume,
             resume_from: None,
+            paused: false,
             ops_done: 0,
             strokes_done: 0,
             console: None,
@@ -230,6 +235,7 @@ impl App {
                 // resume or a called-off pause — ends the pending pause.
                 Event::Busy(label) => {
                     self.pausing = false;
+                    self.paused = false;
                     self.activity = Activity::Busy(label);
                 }
                 Event::State(machine) => {
@@ -255,12 +261,14 @@ impl App {
                 Event::Pausing => self.pausing = true,
                 Event::Paused { done, total } => {
                     self.pausing = false;
+                    self.paused = true;
                     self.ops_done = done;
                     self.activity =
                         Activity::Busy(format!("paused {done}/{total}, pen up (r resume)"));
                 }
                 Event::PlanDone { elapsed_secs } => {
                     self.pausing = false;
+                    self.paused = false;
                     if let Some(plan) = &self.plan {
                         self.ops_done = plan.ops.len();
                     }
@@ -271,6 +279,7 @@ impl App {
                 }
                 Event::Aborted(cause) => {
                     self.pausing = false;
+                    self.paused = false;
                     self.note = Some(self.stop_note(cause));
                     self.disarm(cause);
                 }
@@ -380,7 +389,7 @@ impl App {
                 self.step_index = (self.step_index + 1).min(JOG_STEPS_MM.len() - 1);
             }
             Action::StepSmaller => self.step_index = self.step_index.saturating_sub(1),
-            Action::StartPlot => self.start_plot(),
+            Action::StartPlot => self.start_or_resume_plot(),
             Action::Frame => self.trace_frame(),
             Action::CycleStopTimer => self.cycle_stop_timer(),
             Action::CycleStopDistance => self.cycle_stop_distance(),
@@ -492,6 +501,21 @@ impl App {
     /// Op index to resume drawing from, once accepted (consumed in step 3.4).
     pub fn resume_from(&self) -> Option<usize> {
         self.resume_from
+    }
+
+    /// What `enter` does: resume a held plan, or start the loaded one.
+    ///
+    /// At a paused machine "draw the loaded SVG" can only mean "carry on" —
+    /// starting afresh would redraw the whole sheet over what is already on the
+    /// paper, and open a second job for the same drawing. To start over
+    /// instead, stop the plan with `S` first.
+    fn start_or_resume_plot(&mut self) {
+        if self.paused {
+            tracing::info!("enter at a paused plan: resuming it");
+            self.worker.send(Command::Resume);
+            return;
+        }
+        self.start_plot();
     }
 
     /// Start drawing the loaded plan, if there is one, arming the safety timer.
@@ -1284,5 +1308,164 @@ mod tests {
         app.accept_resume();
 
         assert_eq!(app.resume_from(), Some(expected));
+    }
+
+    /// The operator's exact sequence: start a plot, press esc to pause, then
+    /// press `r` to resume. The plan has to go on reaching the wire.
+    #[test]
+    fn esc_then_r_pauses_and_resumes_the_plot() {
+        let transport = MockTransport::with_read_delay(Duration::from_millis(1));
+        let sent = transport.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(transport),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+        };
+        // Many short strokes: plenty of pen-up boundaries for a pause to land on.
+        let shapes: Vec<Shape> = (0..60)
+            .map(|i| {
+                let y = f64::from(i);
+                Shape::unlabelled(vec![Point::new(0.0, y), Point::new(10.0, y)])
+            })
+            .collect();
+        let mut app = App::new(
+            worker,
+            machine,
+            test_profile(),
+            shapes,
+            None,
+            None,
+            LogRing::new(),
+        );
+
+        app.on_key(key(KeyCode::Enter)); // start the plot
+        std::thread::sleep(Duration::from_millis(100));
+        app.on_key(key(KeyCode::Esc)); // pause
+
+        // Spin the app's own event folding until the hold engages.
+        let mut paused = false;
+        for _ in 0..400 {
+            app.drain_worker_events();
+            if matches!(&app.activity, Activity::Busy(label) if label.starts_with("paused")) {
+                paused = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(paused, "esc never paused the plot: {:?}", app.activity);
+        let at_pause = sent.lock().unwrap().len();
+
+        app.on_key(press('r')); // resume
+        std::thread::sleep(Duration::from_millis(300));
+        app.drain_worker_events();
+        let after_resume = sent.lock().unwrap().len();
+
+        assert!(
+            after_resume > at_pause,
+            "`r` did not resume: the wire stayed at {at_pause} lines, activity {:?}",
+            app.activity
+        );
+    }
+
+    /// An app mid-plot, held at a pause with the pen up.
+    fn paused_mid_plot() -> (App, Arc<Mutex<Vec<String>>>) {
+        let transport = MockTransport::with_read_delay(Duration::from_millis(1));
+        let sent = transport.sent_handle();
+        let driver = Driver::new(Connection {
+            transport: Box::new(transport),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+        };
+        let shapes: Vec<Shape> = (0..60)
+            .map(|i| {
+                let y = f64::from(i);
+                Shape::unlabelled(vec![Point::new(0.0, y), Point::new(10.0, y)])
+            })
+            .collect();
+        let mut app = App::new(
+            worker,
+            machine,
+            test_profile(),
+            shapes,
+            None,
+            None,
+            LogRing::new(),
+        );
+        app.on_key(key(KeyCode::Enter));
+        std::thread::sleep(Duration::from_millis(100));
+        app.on_key(key(KeyCode::Esc));
+        for _ in 0..400 {
+            app.drain_worker_events();
+            if app.paused {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.paused, "the plot never paused: {:?}", app.activity);
+        (app, sent)
+    }
+
+    /// `enter` at a paused machine carries on. It used to open a *second* job
+    /// and send a `RunPlan` that the held worker dropped on the floor: the log
+    /// said "starting plot" three times over and the carriage never moved.
+    #[test]
+    fn enter_at_a_paused_plan_resumes_it_instead_of_starting_a_second_job() {
+        let (mut app, sent) = paused_mid_plot();
+        let job_before = app.job.as_ref().map(|j| j.id);
+        let at_pause = sent.lock().unwrap().len();
+
+        app.on_key(key(KeyCode::Enter));
+
+        std::thread::sleep(Duration::from_millis(300));
+        app.drain_worker_events();
+        assert!(
+            sent.lock().unwrap().len() > at_pause,
+            "enter left the machine idle at {at_pause} lines"
+        );
+        assert_eq!(
+            app.job.as_ref().map(|j| j.id),
+            job_before,
+            "enter opened a second job for the drawing already in progress"
+        );
+        assert!(!app.paused, "the app still thinks the plan is held");
+    }
+
+    /// A pause is when the operator reaches for the pen keys, so they have to
+    /// work. Held commands used to vanish in the worker's catch-all arm, which
+    /// reads as a dead keyboard.
+    #[test]
+    fn the_pen_keys_still_work_while_the_plan_is_paused() {
+        let (mut app, sent) = paused_mid_plot();
+        let at_pause = sent.lock().unwrap().len();
+
+        app.on_key(press(']')); // pen down
+
+        for _ in 0..200 {
+            app.drain_worker_events();
+            if sent.lock().unwrap().len() > at_pause {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let after = sent.lock().unwrap().clone();
+        assert!(
+            after.len() > at_pause,
+            "the pen key did nothing while paused: {after:?}"
+        );
+        assert!(app.paused, "the pen key ended the pause");
     }
 }
