@@ -398,6 +398,83 @@ robi jedno i drugie w vpype przed wczytaniem pliku.
 biegnie ~12% optymistycznie wobec jedynego zegara, jaki mamy (2:31:43 wobec zmierzonych
 2:51:54), i winny jest znany człon ruchu pióra z 2.6.
 
+** 2.11 Brakujące kreski: host jest niewinny, podejrzany to koniec osi Z (2026-09-18)
+*Objaw:* w kilku kolejnych wydrukach *kilku kresek po prostu nie ma na papierze*, w bardzo
+różnych miejscach kartki. Są w SVG i rysuje je oryginalny sterownik.
+
+*Prześledzony job ~1789748512435~* (~voxels …az21 el36…~, 4135 kresek, 2:12:00). Na każdym
+etapie zgadza się co do sztuki, więc *cała droga hosta jest wykluczona* (✔, z plików):
+| generator → SVG  | komentarz w pliku mówi ~strokes=4135~; 11 ~<path>~, 4135 podścieżek |
+| SVG → plotly     | ~shapes=4135 points=8270~ — po dwa punkty, same odcinki             |
+| plotly → plan    | 4135 kresek, 1:1 z SVG: *0 brakujących, 0 nadmiarowych*             |
+| plan → drut      | 29523 ruchy XY, *każda kreska rusza pióro* po zaokrągleniu do µm    |
+| drut → maszyna   | ~committed_index = total = 54047~, zero ostrzeżeń w logu            |
+Dopasowanie planu do SVG to *czysta translacja* ~(−15.15, −15.15)~, bez skalowania, końce
+zgodne co do ~0.001 mm~ — więc *to nie są błędy zmiennoprzecinkowe*; gdyby były, widać by je
+było właśnie tu. Drut też odpada: driver jedzie linia-po-linii i czeka na ~ok~, a ~error:~ /
+~ALARM~ to twardy błąd, który przerwałby plot z wpisem w logu (2.2).
+
+*Nakładanie się kresek jest własnością pliku, nie plotera:* w tym SVG *73 pary odcinków leżą
+na sobie* ze szczeliną 1–2 µm (134 odcinki, 3,2% rysunku), bardzo często o sąsiednich
+indeksach — generator wypisuje wspólną krawędź dwóch sąsiadujących voxeli dwa razy.
+
+*Przy samym piórze plotly jest ostrożniejsze od referencji, nie odwrotnie* (✔, ~pen_handling.py~):
+~sendPenDown~ to dwie linijki i *żadnego czekania* — cały kod liczenia czasów ruchu pióra jest
+tam zakomentowany, ~lower_time~ zostaje 0. Więc „oryginał rysuje, plotly nie" nie tłumaczy się
+sekwencją pióra.
+
+*Podejrzany (❓, do sprawdzenia suwmiarką):* ~$132 = 10.000~ to deklarowana długość osi Z,
+a ~pen_down_z = 10~ w ~config.toml~ siedzi *dokładnie na niej*. ~$20 = 0~, więc soft limity
+nigdy nie zaprotestują. Log datuje to co do minuty: do 2026-09-11 było 5.25 (wcześniej 5.0
+i 4.2), o 09:31 podniesione na żywo na 10.0, od 09-12 w configu — *ostatnie 33 uruchomienia*,
+czyli dokładnie okres reklamacji. Jeśli karetka faktycznie dobija tam do oporu, silnik gubi
+kroki na dole, podniesienie wychodzi z pozycji, w której fizycznie nie był, i *głębokość
+lądowania wędruje w trakcie wydruku* — co daje kreski ginące bez żadnego wzoru.
+*Test:* ~G1 G90 Z5 F5000~, zmierzyć wysokość stalówki, potem ~G1 G90 Z10 F5000~ i zmierzyć
+znowu. *Różnica mniejsza niż 5 mm = oś albo sprężyna dobija do oporu.* ✱
+Uwaga na drugą stronę tej hipotezy: jeśli uchwyt ma zapas skoku, Z=10 jest wręcz dobre
+(większy docisk, większa tolerancja na nierówny papier), a 10.0 mogło zostać ustawione
+*dlatego*, że pióro słabo dotykało — wtedy to objaw, nie przyczyna.
+
+*Co z tego weszło do kodu:* profil czyta ~$132~ jako ~z_max_travel~ i liczy ~pen_headroom_mm~
+= ile osi zostało *pod* ~pen_down_z~. Liczba idzie w linię ~machine profile~, a zapas ≤ 0
+daje ~WARN~ przy starcie. *Ostrzeżenie, nie klamrowanie:* docisk pióra operator ustawia
+patrząc na papier i program nie ma go po cichu zmieniać. ~z_max_travel~ jest ~Option~ bez
+wartości domyślnej — jedyny limit tutaj, który jej nie ma, bo *pretensja do czyjegoś sprzętu
+nie może się opierać na liczbie, którą sami zmyśliliśmy*.
+
+*DLACZEGO ORYGINAŁ RYSUJE WSZYSTKO — i to jest właściwa odpowiedź* (✔, ze źródeł i z logu).
+Obie strony wysyłają ~G1G90 Z5~, ale *nie liczą Z od tego samego zera*:
+- *Referencja otwiera port bez resetu płytki.* ~testPort~ tworzy puste ~serial.Serial()~,
+  ustawia ~rts = False~ i ~dtr = False~ i *dopiero potem* otwiera — więc licznik pozycji Grbla
+  przeżywa sesję i ramka Z z ostatniego ~$H~ obowiązuje dalej.
+- *plotly resetuje płytkę przy każdym połączeniu.* ~SerialTransport::open~ opuszcza RTS/DTR
+  *po* ~.open()~, a wtedy jądro już podniosło DTR. Mówi to sam nagłówek ~handshake.rs~ („that
+  is exactly how the first spike run lost its ~$H~"), a log potwierdza to przy każdym
+  uruchomieniu: ~board rebooted on port open~. Po resecie firmware zeruje pozycję *tam, gdzie
+  karetka akurat stoi*.
+- *Nikt nie homuje.* Referencja wysyła ~$H~ tylko z ręcznego przycisku ~machine_origin~
+  (~idraw.py:529~), nigdy w trakcie plotu, i nie ma żadnego ~G92~/~G10~/~G54~. W plotly ~$H~
+  jest pod klawiszem, a *ostatni homing w całym logu to 2026-09-12 21:21* — wszystkie
+  późniejsze wydruki poszły bez niego. Każdy za to kończy się ~$SLP~ (178 wystąpień), po
+  którym silniki puszczają i zespół pióra może osiąść.
+Stąd ~Z=5~ nie jest wysokością nad papierem, tylko *5 mm poniżej miejsca, w którym pióro
+akurat zostawiono*. I zapadka działa w jedną stronę: im niżej skończyła się poprzednia sesja,
+tym większej liczby trzeba następnym razem. Dokładnie to widać w historii configu:
+*4,2 → 5,0 → 5,25 → 10,0*. Referencja rysuje wszystko nie dlatego, że jest lepsza, tylko
+dlatego, że *ma pod piórem jeszcze 5 mm osi*, a plotly nie ma już nic.
+
+*Wniosek:* to nie referencja wygrywa, tylko plotly gubi ramkę Z przy każdym starcie i pozwala
+gonić ją aż do końca osi bez jednego słowa. Ostrzeżenie wyżej łapie skutek. ❓ Przyczyny są
+dwie i obie do zrobienia: (1) otwierać port bez resetu (ustawić linie *przed* ~open()~, jeśli
+~serialport~ to potrafi — inaczej wymusić ~$H~), (2) *homować przed wydrukiem*, bo bez tego
+~pen_down_z~ znaczy co innego w każdej sesji. Dopiero w zahomowanej ramce ma sens ustawienie
+pióra w uchwycie tak, żeby papier wypadał *w środku* 10 mm skoku Z, a nie na jego końcu. ✱
+
+*Drugi, słabszy kandydat:* rysunek ma 73 odcinki krótsze niż 1 mm, 19 poniżej 0,3 mm i 3
+poniżej 0,1 mm (najkrótszy 0,056 mm) — takie zostawiają kropkę, nie kreskę. Ale to kiepsko
+tłumaczy różnicę wobec referencji, która trzyma pióro na papierze *krócej* niż my.
+
 * 3. Funkcje
 ** 3.1 MVP
 - [ ] Auto-wykrycie i połączenie z iDraw (CH340, handshake, wersja, status ~?~).

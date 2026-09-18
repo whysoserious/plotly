@@ -52,6 +52,9 @@ mod grbl {
     /// Maximum travel per axis, mm — the drawable field.
     pub const TRAVEL_X: u16 = 130;
     pub const TRAVEL_Y: u16 = 131;
+    /// Maximum travel of the pen axis, mm — how far down the pen can go
+    /// before the axis has nowhere left to move.
+    pub const TRAVEL_Z: u16 = 132;
 }
 
 /// Everything about the machine that is not protocol: how big it is, how fast
@@ -78,6 +81,14 @@ pub struct Profile {
     /// Fastest the pen axis may move, mm/min (`$112`). The ceiling on
     /// [`crate::plotter::driver::PenSettings::z_feed`].
     pub z_max_feed: u32,
+    /// How far the pen axis can travel, mm (`$132`), when the board says.
+    ///
+    /// `None` when it did not — under `--simulate`, or on a board whose `$$`
+    /// leaves it out. Unlike every other limit here this one has no fallback
+    /// on purpose: it exists to be compared against
+    /// [`crate::plotter::driver::PenSettings::down_z`], and a complaint about
+    /// somebody's hardware had better not rest on a number we made up.
+    pub z_max_travel: Option<f64>,
     /// Acceleration of the pen axis, mm/s² (`$122`).
     ///
     /// Here for the same reason as `accel_mm_s2`: a pen move costs ~240 ms and
@@ -128,6 +139,7 @@ impl Profile {
             junction_deviation_mm: DEFAULT_JUNCTION_DEVIATION_MM,
             z_max_feed: DEFAULT_Z_MAX_FEED,
             z_accel_mm_s2: DEFAULT_Z_ACCEL_MM_S2,
+            z_max_travel: None,
         })
     }
 
@@ -164,6 +176,7 @@ impl Profile {
         if let Some(accel) = reported.get(grbl::ACCEL_Z).filter(|a| *a > 0.0) {
             self.z_accel_mm_s2 = accel;
         }
+        self.z_max_travel = reported.get(grbl::TRAVEL_Z).filter(|t| *t > 0.0);
         tracing::debug!(
             width_mm = self.field.width_mm,
             height_mm = self.field.height_mm,
@@ -172,6 +185,7 @@ impl Profile {
             junction_deviation_mm = self.junction_deviation_mm,
             z_max_feed = self.z_max_feed,
             z_accel_mm_s2 = self.z_accel_mm_s2,
+            z_max_travel = ?self.z_max_travel,
             "field and limits taken from the firmware"
         );
     }
@@ -313,6 +327,52 @@ impl Profile {
         self.plan.ramp_feed = self.plan.ramp_feed.min(self.plan.draw_feed);
     }
 
+    /// How much of the pen axis is left underneath the pen-down height, in
+    /// mm — `None` when the board never said how long that axis is.
+    ///
+    /// The pen presses on the paper because the Z carriage is driven *past*
+    /// where the paper is, and something compliant — a spring, the holder —
+    /// takes up the difference. That only works while the carriage still has
+    /// somewhere to go. At zero headroom it reaches the end of its own travel
+    /// instead, and an open-loop axis that stalls against a stop loses steps:
+    /// the lift that follows starts from somewhere other than where Grbl
+    /// believes it is, so the next landing is shallower than the last and the
+    /// depth walks over the course of a plot. Strokes then go missing in no
+    /// pattern at all, which is what makes it so hard to recognise (§2.11).
+    pub fn pen_headroom_mm(&self) -> Option<f64> {
+        // The pen heights are `f32` (they are a tenth of a millimetre at
+        // best); everything `$$` reports is `f64`. Widen rather than narrow.
+        self.z_max_travel
+            .map(|max| max - f64::from(self.pen.down_z))
+    }
+
+    /// Say so when the pen is asked for a height its axis does not have.
+    ///
+    /// A warning and not a clamp: how hard the pen presses is the one setting
+    /// an operator tunes by looking at the paper, and moving it behind their
+    /// back would quietly change every drawing after. Naming the number they
+    /// cannot see is the whole job — `$132` is reported by every board and
+    /// read by nothing, so a `pen_down_z` sitting exactly on it looks like a
+    /// perfectly ordinary config file.
+    pub fn check_pen_travel(&self) {
+        match (self.z_max_travel, self.pen_headroom_mm()) {
+            (Some(max), Some(headroom)) if headroom <= 0.0 => tracing::warn!(
+                pen_down_z = self.pen.down_z,
+                z_max_travel = max,
+                headroom_mm = headroom,
+                "the pen is driven to the end of its own axis; the carriage has nothing left to \
+                 give, and an axis that stalls against a stop loses steps — give pen_down_z room"
+            ),
+            _ => {}
+        }
+        if self.pen.up_z < 0.0 {
+            tracing::warn!(
+                pen_up_z = self.pen.up_z,
+                "the pen is lifted past the top of its axis"
+            );
+        }
+    }
+
     /// One line for the status bar: `idraw-a0 841×1189`.
     pub fn summary(&self) -> String {
         format!(
@@ -416,8 +476,14 @@ pub fn resolve(
         pen_settle_up_secs = profile.pen.settle_up_secs,
         pen_settle_down_secs = profile.pen.settle_down_secs,
         pen_fence = ?profile.pen.fence,
+        // What is left of the pen axis below `pen_down_z`. Here for the same
+        // reason as `pen_lift_mm`: it is a subtraction the reader should not
+        // have to do, and the one number that says whether the pen is
+        // pressing on paper or on its own end stop (§2.11).
+        pen_headroom_mm = ?profile.pen_headroom_mm(),
         "machine profile"
     );
+    profile.check_pen_travel();
     Ok(profile)
 }
 
@@ -639,6 +705,57 @@ mod tests {
         profile.clamp_feeds();
         assert_eq!(profile.z_max_feed, 9000);
         assert_eq!(profile.pen.z_feed, 9000);
+    }
+
+    /// `$132` is the length of the pen axis, and the pen-down height is
+    /// measured against it. Our own machine reports 10 mm, which is exactly
+    /// where a config file had been parking the pen (§2.11).
+    #[test]
+    fn the_pen_axis_length_comes_from_the_firmware_and_leaves_headroom() {
+        let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        assert_eq!(
+            profile.pen_headroom_mm(),
+            None,
+            "a board that has not spoken is not evidence of anything"
+        );
+
+        profile.apply_reported(&reported(&[(132, 10.0)]));
+        profile.apply_override(&ProfileOverride {
+            pen_down_z: Some(7.5),
+            ..Default::default()
+        });
+
+        assert_eq!(profile.z_max_travel, Some(10.0));
+        assert_eq!(profile.pen_headroom_mm(), Some(2.5));
+    }
+
+    /// The pen parked on the end of its own axis: no headroom left for the
+    /// holder to give, and nothing in Grbl to complain about it — `$20` is 0
+    /// on this machine, so soft limits never fire.
+    #[test]
+    fn a_pen_at_the_end_of_its_axis_has_no_headroom_left() {
+        let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        profile.apply_reported(&reported(&[(132, 10.0)]));
+        profile.apply_override(&ProfileOverride {
+            pen_down_z: Some(10.0),
+            ..Default::default()
+        });
+
+        assert_eq!(profile.pen_headroom_mm(), Some(0.0));
+        // Warned about, never corrected: the operator set that depth by
+        // looking at the paper and we are not moving it for them.
+        profile.check_pen_travel();
+        assert_eq!(profile.pen.down_z, 10.0);
+    }
+
+    /// A nonsense `$132` is no better than none: a zero-length pen axis would
+    /// make every sane pen height look like an overrun.
+    #[test]
+    fn a_zero_pen_axis_length_is_ignored() {
+        let mut profile = Profile::builtin(DEFAULT_PROFILE).unwrap();
+        profile.apply_reported(&reported(&[(132, 0.0)]));
+        assert_eq!(profile.z_max_travel, None);
+        assert_eq!(profile.pen_headroom_mm(), None);
     }
 
     /// The pen axis is faster than XY on this machine (`$112` = 15000 against
