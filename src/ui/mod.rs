@@ -24,17 +24,24 @@ pub(crate) fn fmt_time(secs: f64) -> String {
     }
 }
 
-/// Seconds spelled out as `1h 23m 45s` — the shape a finished plot's note
-/// wants. That note is read on its own, minutes after the fact, with no live
-/// counter beside it to say what the fields mean, so it names its units
-/// instead of leaning on the clock punctuation [`fmt_time`] uses.
+/// Seconds spelled out as `1h 23m 45s`, growing a days field past a day — the
+/// shape a finished plot's note and the `plan done` log line want. Both are
+/// read on their own, minutes or days after the fact, with no live counter
+/// beside them to say what the fields mean, so this names its units instead of
+/// leaning on the clock punctuation [`fmt_time`] uses.
 pub(crate) fn fmt_duration(secs: f64) -> String {
     let secs = secs.max(0.0).round() as u64;
-    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
-    match (h, m) {
-        (0, 0) => format!("{s}s"),
-        (0, m) => format!("{m}m {s}s"),
-        (h, m) => format!("{h}h {m}m {s}s"),
+    let (d, h, m, s) = (
+        secs / 86_400,
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60,
+    );
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, m) => format!("{m}m {s}s"),
+        (0, h, m) => format!("{h}h {m}m {s}s"),
+        (d, h, m) => format!("{d}d {h}h {m}m {s}s"),
     }
 }
 
@@ -147,6 +154,12 @@ mod tests {
         assert_eq!(fmt_duration(3599.0), "59m 59s");
         assert_eq!(fmt_duration(3600.0), "1h 0m 0s");
         assert_eq!(fmt_duration(7687.0), "2h 8m 7s");
+        assert_eq!(fmt_duration(8912.829156799), "2h 28m 33s");
+        // Past a day the hours field would otherwise keep counting up, and
+        // `49h 21m 03s` is a number the reader has to divide in their head.
+        assert_eq!(fmt_duration(86_399.0), "23h 59m 59s");
+        assert_eq!(fmt_duration(86_400.0), "1d 0h 0m 0s");
+        assert_eq!(fmt_duration(177_663.0), "2d 1h 21m 3s");
         // A negative duration is nonsense, not a panic.
         assert_eq!(fmt_duration(-5.0), "0s");
     }

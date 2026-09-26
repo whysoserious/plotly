@@ -856,8 +856,11 @@ skaluje się z profilem zamiast być stałą.
 ~elapsed_secs~, a status pokazuje ~done in 1:12:30~ w miejscu, gdzie przed chwilą był licznik
 na żywo. Zegar startuje razem z planem (*po* preambule wznawiania), więc na wznowionym jobie
 to czas *tego* przebiegu — czas ścienny przez pauzę jest czasem operatora, nie plotera.
-Ta sama liczba leci do logu (~INFO plan done secs=…~). Format czasu jest teraz wspólny
-(~ui::fmt_time~) i dostaje pole godzin, gdy jest co pokazywać: ~128:07~ nikt nie czyta.
+Ta sama liczba leci do logu (~INFO plan done ops=… secs=… took=2h 28m 33s~): surowe sekundy
+zostają pod kalibrację estymaty, a obok nich czas rozpisany, bo ~secs=8912.829156799~ nikt nie
+czyta jako czasu. Format czasu jest teraz wspólny — ~ui::fmt_time~ (~128:07~ nikt nie czyta,
+więc dostaje pole godzin, gdy jest co pokazywać) i ~ui::fmt_duration~ dla noty i logu, z polem
+dni powyżej doby (plot bez opieki potrafi jechać dłużej niż 24 h).
 
 /Rząd wielkości (~example.svg~, 6312 kształtów):/ 161 m tuszu, 163 m przejazdów, ~2 h 08.
 Dominują *pen-move'y* (6312 × 2) i przejazdy — dokładnie to, czego naiwna estymata nie widzi.

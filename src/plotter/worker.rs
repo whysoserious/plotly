@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::geometry::Point;
 use crate::job::ProgressWriter;
 use crate::plan::{Op, Plan};
+use crate::ui::fmt_duration;
 
 use super::driver::{Driver, DriverError, Pen};
 
@@ -472,7 +473,16 @@ fn run_plan(
     }
 
     let elapsed_secs = started.elapsed().saturating_sub(paused_for).as_secs_f64();
-    tracing::info!(ops = total, secs = elapsed_secs, "plan done");
+    // `secs` stays for the arithmetic (it is what the estimate gets calibrated
+    // against), but nobody reads `secs=8912.829156799` as a duration — an A0
+    // plot runs for hours, and an unattended one can run past a day — so the
+    // spelled-out time goes beside it, same wording as the note on screen.
+    tracing::info!(
+        ops = total,
+        secs = elapsed_secs,
+        took = %fmt_duration(elapsed_secs),
+        "plan done"
+    );
     if let Some(writer) = progress {
         let pos = driver.position();
         if let Err(err) = writer.finish(total, [pos.x, pos.y]) {
