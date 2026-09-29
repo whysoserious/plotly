@@ -732,6 +732,18 @@ wznowieniem nie ma znaczenia.
 ~resuming: travelling to op N~ (przejazd przez arkusz). Pod jedną etykietą „resuming" była to
 minuta ekranu, który nic nie mówi — a to dokładnie ten rodzaj ciszy, który każe wcisnąć Ctrl-C.
 
+*Trzy sposoby, w jakie plan może się zacząć — ~Start~ (2026-09-27).* ~Command::RunPlan~ bierze
+~Start::Fresh~ / ~Start::Carry{index}~ / ~Start::Resume{index}~ zamiast gołego ~start_index~,
+bo różnią się *nie* indeksem, a tym, co wiadomo o karetce:
+- ~Fresh~ — od zera, rysunek układany pod głowicą (~place_at_head~).
+- ~Carry~ — kontynuacja w *tej samej sesji*, która stanęła (cutoff, patrz §9). Pozycja jest
+  znana, więc *bez ~$H~*: pen-up, dojazd do punktu op (no-op, jeśli głowica nie ruszyła się
+  z miejsca), przywrócenie pióra i feedu, dalej. Etykieta: ~carrying on from op N~.
+- ~Resume~ — job z dysku po restarcie/zaniku prądu: pozycja to tylko liczba w pliku, więc pełna
+  preambuła z ~$H~ (procedura niżej).
+Homing w ~Carry~ byłby minutą jazdy w róg i z powrotem *po nic* — a dokładnie to zgłosił
+użytkownik jako błąd (§9).
+
 ** Procedura wznawiania (mocna dzięki homingowi iDraw)
 1. Połącz + handshake.
 2. ~$H~ homing → pewny, absolutny układ odniesienia z krańcówek.
@@ -802,9 +814,10 @@ Strzałki ruszają XY krokiem; dedykowane klawisze podnoszą/opuszczają pióro.
 | ~+~ / ~-~ | zmień krok jog (0.1 / 1 / 5 / 10 mm) |
 | ~Space~ | toggle pen (jawny ruch Z, nie ~$TP~ — 1.3) |
 | ~[~ / ~]~ (lub ~PgUp~/~PgDn~) | pen up / pen down |
-| ~Enter~ | start rysowania wczytanego SVG |
+| ~Enter~ | start rysowania wczytanego SVG; po cutoffie — *kontynuacja* z miejsca stopu (§9) |
 | ~t~ | timer bezpieczeństwa: off / 1 / 5 / 15 min (stop + pen up) — 2.8 |
-| ~m~ | stop po dystansie: off / 50 / 100 / 500 cm (stop + pen up) |
+| ~m~ | stop po dystansie: off / 50 / 100 / 500 cm (kończy kształt, pen up) |
+| ~M~ | stop po dystansie: *dowolna* liczba cm — wpisz, ~Enter~ uzbraja (tryb ~Prompt~) |
 | ~h~ | home (~$H~) |
 | ~d~ | disable motors (~$SLP~) — po nim pozycja jest nieznana do następnego ~$H~ |
 | ~o~ | ~~set origin~~ — *niepotrzebne*: originem jest pozycja głowicy przy ~Enter~ (2.4 pkt C) |
@@ -964,6 +977,66 @@ Trzy rzeczy, które to ukryły, i co je zastąpiło:
 | klawisz zamykający prompt szedł do logu na ~debug~ | idzie na ~info~ *z nazwą klawisza* — bo ten klawisz zaraz coś zrobi |
 Fall-through z §3.3 *zostaje* (nie blokujemy sterowania maszyną za nieodpowiedzianym promptem);
 zmienia się to, że jego skutek widać na ekranie i w logu.
+
+*Dystans wpisywany z klawiatury — ~M~ (2026-09-26, na życzenie użytkownika).* Drabinka
+50/100/500 cm na ~m~ zgaduje za operatora; „daj mu przejechać jeszcze 20 cm i zobaczymy tusz"
+nie jest żadnym z tych trzech. ~M~ otwiera *jednolinijkowy prompt* w wierszu konsoli i bierze
+liczbę *centymetrów* — bo w takich jednostkach ogląda się rysunek i tak jest opisana drabinka.
+Decyzje, które za tym stoją:
+- *Trzeci tryb wejścia* (~Mode::Prompt~ w ~keys.rs~), nie „konsola dla liczb": ten sam kontrakt
+  co przy ~M3 S100~ — ~S~ wpisane w „stop after 5 cm" ma być tekstem, nie STOP-em. Panic
+  ~Ctrl-C~/~Ctrl-X~ działa też tutaj. Znaki spoza liczby app *wyrzuca* przy wpisywaniu,
+  zamiast odrzucać całą linię przy ~Enter~.
+- *Przecinek działa jak kropka.* Liczba jest wklepywana przy ploterze, a cutoff odrzucony
+  przez kształt separatora czyta się jak zepsuty klawisz.
+- *Pusta linia = off*, bo to najkrótsza droga z powrotem do „rysuj całość"; ~Esc~ zamyka prompt
+  *nie ruszając* tego, co było uzbrojone.
+- *W trakcie plota uzbraja się natychmiast* (~Command::StopAfterDistance~ leci od razu), a nie
+  dopiero przy następnym ~enter~ jak ~m~: sens wpisywania dystansu w trakcie rysowania dotyczy
+  *tego* rysunku. Worker liczy budżet od dystansu już przejechanego, więc to jest „jeszcze
+  tyle" — i nota mówi ~distance stop … from here~, żeby nikt nie czytał tego jako „od początku
+  kartki". Poza plotem: nota ~distance stop at …~ i uzbrojenie na najbliższy ~enter~.
+- *Cutoff dalszy niż rysunek* dostaje w nocie ~the drawing only travels …~ — nieuzbrojony
+  i taki, który nigdy nie wystrzeli, wyglądają z fotela operatora tak samo.
+- ~m~ *kasuje* wpisaną wartość (jeden przycisk → off, drugi → początek drabinki), zamiast
+  zgadywać, do którego szczebla jej najbliżej.
+
+*Cutoff dystansowy kończy kształt, zanim stanie (2026-09-26, na życzenie użytkownika).*
+Stop na granicy op zostawiał kreskę urwaną w połowie i kleks w miejscu, gdzie pióro poszło
+w górę — a z takiego pół-kształtu nie da się wznowić niczego poza nim samym. Teraz wyczerpanie
+budżetu tylko *uzbraja* stop; bierze go dopiero ~PenUp~, który plan sam stawia na końcu
+kształtu — dokładnie ten sam mechanizm co pauza (~pause_pending~ / ~driver.pen() == Pen::Up~).
+Konsekwencje, które trzeba było dołożyć:
+- *Licznik dystansu przekracza uzbrojoną wartość* — nota mówi więc ~stopped by the … distance
+  cutoff *at the end of the shape*~, żeby 41 cm na liczniku przy cutoffie 25 cm nie wyglądało
+  na błąd.
+- *Czekanie jest widoczne:* nowe ~Event::Stopping~ (rodzeństwo ~Pausing~, osobne, bo „stopping"
+  i „pausing" to nie ta sama obietnica) → pasek statusu pisze ~stopping after this shape~.
+  Długi kształt potrafi się rysować minutami i cisza czyta się jak zgubiony cutoff.
+- *W ostatnim kształcie cutoff się wycofuje.* ~last_pen_down~ (liczone raz, ~rposition~) mówi,
+  czy przed nami jest jeszcze jakiś kształt. Jeśli nie — stop nie ma czego skracać, a
+  zatrzymanie na ogonie planu (~SetFeed~ po ostatnim ~PenUp~) kosztowałoby: brak ~done in …~,
+  silniki pod napięciem i job o jeden op od kompletu, czyli *propozycja wznowienia skończonego
+  rysunku* przy następnym starcie. Więc plan kończy się normalnie.
+- *Zegar ~t~ zostaje twardy* — on ogranicza czas pracy /bez nadzoru/, a kształt, który
+  potrwa jeszcze dziesięć minut, jest dokładnie tym, co ma uciąć.
+
+*~Enter~ po cutoffie kontynuuje, a nie rysuje od nowa (2026-09-27, zgłoszenie użytkownika).*
+Objaw: cutoff zatrzymał plot, ~Enter~ — i ploter jedzie „w stronę homingu", potem wraca w inne
+miejsce i pisze dalej. Przyczyna była w ~App~, nie w ruchu: po ~Aborted~ ani ~paused~, ani
+~resume_from~ nie było ustawione, więc ~Enter~ leciał w zwykły ~start_plot~ → ~place_at_head~,
+czyli *cały rysunek układany od nowa pod głowicą*, która stała w środku kartki, i plan od op 0.
+Karetka jechała do nowego początku (przy rysunku wystającym poza pole — obcinanym do krawędzi,
+stąd „w stronę homingu") i rysowała wszystko po istniejącym tuszu.
+Co to zastąpiło:
+| ~Enter~ zaczynał od zera pod głowicą | ~App::stopped_at~ — indeks op, na którym cutoff przerwał plot; ~Enter~ posyła ~Start::Carry{index}~ z *niezmienionym* planem i w tym samym jobie |
+| wznowienie umiałoby tylko z ~$H~ | ~Start~ rozdziela „kontynuuj" od „wznów z dysku" (§6); ~Carry~ nie homuje — pozycja jest znana, a ~$H~ to minuta jazdy w róg |
+| nic nie mówiło, co zrobi ~Enter~ | pasek statusu pisze ~stopped at 50% - enter carries on, S starts over~ *dopóki* punkt kontynuacji stoi (nota o cutoffie gaśnie przy pierwszym klawiszu) |
+| ~f~ też przekładał plan pod głowicę | ~may_place_at_head~ — jeden predykat dla ~Enter~ i ~f~; patrzenie, gdzie rysunek wyląduje, nie może go przesuwać |
+Podział „co jest kontynuowalne": ~Timer~ i ~Distance~ tak (kartka jest w połowie, maszyna stoi
+dokładnie tam, gdzie plan ją zostawił), ~Asked~ nie — ręczne ~S~ to właśnie sposób, żeby
+*wyrzucić* przebieg (§9, ~Enter~ przy pauzie), więc ~S~ kasuje też punkt kontynuacji. Postój
+przy ~S~ na bezczynnej maszynie nie emituje ~Aborted~, dlatego kasuje go ~App~ u siebie.
 
 * 10. Profile maszyn (iDraw)
 Pole robocze (komplet z ~idraw2_0_conf.py~, ~model~ 1–4 + warianty travel):

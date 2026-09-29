@@ -67,13 +67,15 @@ const STROKES_WIDTH: u16 = 30;
 const MIN_CANVAS_WIDTH: u16 = 30;
 
 /// Draw the full UI: status (top), canvas (middle, grows), log (bottom), plus
-/// the raw G-code console between canvas and log while it is open.
+/// the one-line input row between canvas and log while something is being
+/// typed — the raw G-code console, or the distance-stop prompt.
 pub fn draw(frame: &mut Frame, app: &App) {
-    let console_height = if app.console().is_some() { 3 } else { 0 };
+    let typing = app.console().is_some() || app.stop_distance_prompt().is_some();
+    let input_height = if typing { 3 } else { 0 };
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
-        Constraint::Length(console_height),
+        Constraint::Length(input_height),
         Constraint::Length(10),
     ])
     .split(frame.area());
@@ -87,8 +89,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         None => canvas::canvas(frame, areas[1], app),
     }
+    // Only one of the two can be open: the console takes the row, and `M` is
+    // not a binding while it is.
     if let Some(line) = app.console() {
         panels::console(frame, areas[2], line);
+    } else if let Some(cm) = app.stop_distance_prompt() {
+        panels::stop_distance_prompt(frame, areas[2], cm);
     }
     panels::log(frame, areas[3], app);
 

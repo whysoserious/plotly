@@ -210,10 +210,11 @@ STOP on the `S`). <kbd>?</kbd> shows this list in the app.
 |---|---|
 | arrows | jog XY by the current step (up = up the page) |
 | <kbd>+</kbd> / <kbd>-</kbd> | jog step: 0.1 / 1 / 5 / 10 mm |
-| <kbd>Enter</kbd> | draw the loaded SVG (or resume, at the resume prompt) |
+| <kbd>Enter</kbd> | draw the loaded SVG — or carry on from a cutoff's stop, or resume at the resume prompt |
 | <kbd>f</kbd> | trace the drawing's outline, pen up — where will it land? |
 | <kbd>t</kbd> | safety timer: off / 1 / 5 / 15 min (stop + pen up) |
-| <kbd>m</kbd> | distance stop: off / 50 / 100 / 500 cm (stop + pen up) |
+| <kbd>m</kbd> | distance stop: off / 50 / 100 / 500 cm (finishes the shape, pen up) |
+| <kbd>M</kbd> | distance stop at any number of cm — type it, <kbd>Enter</kbd> arms it |
 | <kbd>[</kbd> / <kbd>PgUp</kbd> | pen up |
 | <kbd>]</kbd> / <kbd>PgDn</kbd> | pen down |
 | <kbd>.</kbd> / <kbd>,</kbd> | press the pen harder / lighter (Z by 0.05 mm) |
@@ -227,6 +228,47 @@ STOP on the `S`). <kbd>?</kbd> shows this list in the app.
 | <kbd>c</kbd> | raw G-code console |
 | <kbd>?</kbd> / <kbd>F1</kbd> | this list |
 | <kbd>q</kbd> | quit |
+
+### Distance stop (<kbd>M</kbd>)
+
+A line for the centimetres to stop after, in the row the console uses. Typed
+digits (and `.` or `,`) are text here, so <kbd>S</kbd> and <kbd>q</kbd> do
+nothing until the prompt is closed; <kbd>Ctrl-C</kbd> still panics.
+
+| Key | What it does |
+|---|---|
+| <kbd>Enter</kbd> | arm the cutoff at that many cm — on an empty line, switch it off |
+| <kbd>Backspace</kbd> | delete a character |
+| <kbd>Esc</kbd> | close the prompt, leaving whatever was armed |
+
+**The shape is always finished first.** Spending the budget only arms the
+stop; what makes it take is the pen coming up at the end of the shape being
+drawn, so the plot never leaves half a line and a blob on the paper. Two things
+follow: the travel counter reads *past* the distance that was armed (the status
+bar says `stopping after this shape` while it draws it out), and a budget spent
+inside the **last** shape stops nothing — there is no shape left to cut short,
+so the plot ends as a finished plot, motors released and all.
+
+**<kbd>Enter</kbd> after a cutoff carries the plot on** from the op it stopped
+at, with the drawing exactly where it was and **no homing** — the head is still
+where the plan left it, so the plot picks up from that point even if you jogged
+away to look at the ink. The status bar says so while it stands
+(`stopped at 50% - enter carries on, S starts over`), and <kbd>S</kbd> is how
+you throw the run away instead: it drops the stop point, so the next
+<kbd>Enter</kbd> lays the drawing down under the pen again. A job picked up
+*after a restart* is the other case — there the position is only a number in a
+file, so that one does home first.
+
+Armed before a plot, the cutoff counts from the start of the drawing and is
+re-armed by every <kbd>Enter</kbd> until it fires. Typed **while a plot runs**
+it takes effect at once and counts from there — the status note says
+`distance stop … from here` — which is how you let a running plot draw another
+20 cm and then stop with the pen up. A cutoff that fires disarms itself and
+names itself in the status bar.
+
+The safety timer (<kbd>t</kbd>) does *not* wait for a shape: it bounds how long
+the machine runs unattended, and a shape that takes ten more minutes is exactly
+what it is there to cut short.
 
 ### Console (<kbd>c</kbd>)
 

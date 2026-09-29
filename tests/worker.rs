@@ -8,7 +8,7 @@ use plotly::geometry::{Placement, Point, Transform};
 use plotly::plan::{Op, Plan, PlanSettings};
 use plotly::plotter::driver::Driver;
 use plotly::plotter::mock::MockTransport;
-use plotly::plotter::worker::{Command, Event, Worker};
+use plotly::plotter::worker::{Command, Event, Start, Worker};
 use plotly::plotter::Connection;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -61,7 +61,7 @@ fn worker_draws_the_whole_plan_in_order_with_progress() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
 
     // Collect progress until the plan finishes.
@@ -141,7 +141,7 @@ fn a_y_zero_move_prints_without_negative_zero() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
 
     // Wait for the plan to finish.
@@ -182,7 +182,7 @@ fn resume_from_an_index_sends_only_the_remaining_ops_once() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
-        start_index: start,
+        start: Start::Resume { index: start },
     });
 
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
@@ -206,6 +206,62 @@ fn resume_from_an_index_sends_only_the_remaining_ops_once() {
     assert_eq!(hits, 1, "last op drawn {hits} times, want exactly once");
 }
 
+/// Carrying on inside the session that stopped the plot must not home: the head
+/// is already where the plan left it, and `$H` would drive it to the far corner
+/// for ~25 s, then travel back — and on the way it would drag the pen across the
+/// sheet. The plot has to pick up exactly where it stopped.
+#[test]
+fn carrying_on_does_not_home_and_continues_from_the_stop_point() {
+    let line = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+    let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
+    let total = plan.ops.len();
+    let start = total / 2;
+
+    // Where the plan stands just before the op we carry on from.
+    let resume_point = plan.ops[..start]
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            Op::MoveTo(p) => Some(*p),
+            _ => None,
+        })
+        .expect("the plan moves before the halfway point");
+
+    let (mut worker, sent) = worker_on_mock();
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+        start: Start::Carry { index: start },
+    });
+
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if matches!(event, Event::PlanDone { .. } | Event::Aborted(_)) {
+            break;
+        }
+    }
+    worker.shutdown();
+
+    let sent = sent.lock().unwrap();
+    assert!(
+        !sent.iter().any(|l| l == "$H"),
+        "carrying on homed the machine: {sent:?}"
+    );
+
+    // It picks up at the stop point: the first move of the run is to there, not
+    // to the top of the drawing.
+    let t = Transform::idraw();
+    let at = t.map_point(resume_point);
+    let first_move = sent
+        .iter()
+        .find(|l| l.starts_with("G1 X"))
+        .expect("nothing was drawn");
+    assert_eq!(
+        *first_move,
+        format!("G1 X{:.3} Y{:.3}", at.x + 0.0, at.y + 0.0),
+        "the run opens somewhere other than the stop point"
+    );
+}
+
 #[test]
 fn a_repeated_absolute_move_is_the_same_line_so_it_is_idempotent() {
     // Sending the same absolute MoveTo twice yields identical G-code; on the
@@ -218,7 +274,7 @@ fn a_repeated_absolute_move_is_the_same_line_so_it_is_idempotent() {
     worker.send(Command::RunPlan {
         plan,
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         if matches!(event, Event::PlanDone { .. }) {

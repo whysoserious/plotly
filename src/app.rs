@@ -17,7 +17,7 @@ use crate::keys::{action_for, Action, Mode};
 use crate::logging::LogRing;
 use crate::plan::estimate::{self, Estimate};
 use crate::plan::{Plan, Shape};
-use crate::plotter::worker::{Command, Event, MachineState, StopCause, Worker};
+use crate::plotter::worker::{Command, Event, MachineState, Start, StopCause, Worker};
 use crate::profiles::Profile;
 use crate::{tui, ui};
 
@@ -35,7 +35,8 @@ const DEFAULT_STEP_INDEX: usize = 1;
 const STOP_TIMER_MINUTES: [u64; 3] = [1, 5, 15];
 
 /// Distance-cutoff options cycled by `m`, in millimetres. Stops the plot and
-/// lifts the pen once that much travel is done.
+/// lifts the pen once that much travel is done. `M` arms any other distance;
+/// these are the ladder the one key steps through.
 const STOP_DISTANCE_MM: [f64; 3] = [500.0, 1000.0, 5000.0];
 
 /// How much `,` / `.` change the pen-down height, mm.
@@ -82,6 +83,10 @@ pub struct App {
     /// A pause was asked for and the plot is drawing out the current shape
     /// before it takes hold, for the status bar.
     pausing: bool,
+    /// The distance cutoff spent its budget and the plot is drawing out the
+    /// current shape before it stops. Same idea as `pausing`, different
+    /// promise: this one is not coming back.
+    stopping: bool,
     /// The plan is held at a pause, pen up. `enter` means "get going again"
     /// here rather than "start a plot", so the half-drawn sheet is not drawn
     /// over from the top.
@@ -105,6 +110,11 @@ pub struct App {
     resume: Option<Resumable>,
     /// Op index to resume drawing from, set when a resume is accepted (§3.4).
     resume_from: Option<usize>,
+    /// Op index a cutoff cut this session's plot short at, if one did. While
+    /// it stands, `enter` carries that plot on from there instead of laying the
+    /// drawing down afresh — the plan and the paper are both half-done, and
+    /// starting over would draw the whole sheet again over the existing ink.
+    stopped_at: Option<usize>,
     /// Ops of the plan executed so far — the anchor for stroke progress. Set
     /// from worker events, from the resume point, and back to 0 on a fresh
     /// start, so the stroke list agrees with the machine at all times.
@@ -121,8 +131,13 @@ pub struct App {
     step_index: usize,
     /// Armed safety timer as an index into [`STOP_TIMER_MINUTES`]; `None` = off.
     stop_timer: Option<usize>,
-    /// Armed distance cutoff as an index into [`STOP_DISTANCE_MM`]; `None` = off.
-    stop_distance: Option<usize>,
+    /// Armed distance cutoff in millimetres; `None` = off. `m` steps through
+    /// [`STOP_DISTANCE_MM`] and `M` types any value, so what is kept is the
+    /// distance itself rather than a place on the ladder.
+    stop_distance: Option<f64>,
+    /// Centimetres being typed at the distance-stop prompt (`M`); `Some` while
+    /// it is open, which is also what puts the key map into [`Mode::Prompt`].
+    stop_distance_input: Option<String>,
     /// Terminal events read ahead during jog coalescing, not yet handled.
     pending_events: VecDeque<TermEvent>,
     log: LogRing,
@@ -152,6 +167,7 @@ impl App {
             activity: Activity::Idle,
             note: None,
             pausing: false,
+            stopping: false,
             profile,
             shapes,
             plan,
@@ -160,6 +176,7 @@ impl App {
             job: None,
             resume,
             resume_from: None,
+            stopped_at: None,
             paused: false,
             ops_done: 0,
             strokes_done: 0,
@@ -169,6 +186,7 @@ impl App {
             step_index: DEFAULT_STEP_INDEX,
             stop_timer: None,
             stop_distance: None,
+            stop_distance_input: None,
             pending_events: VecDeque::new(),
             last_log_len: log.len(),
             log,
@@ -235,6 +253,7 @@ impl App {
                 // resume or a called-off pause — ends the pending pause.
                 Event::Busy(label) => {
                     self.pausing = false;
+                    self.stopping = false;
                     self.paused = false;
                     self.activity = Activity::Busy(label);
                 }
@@ -259,6 +278,7 @@ impl App {
                     }
                 }
                 Event::Pausing => self.pausing = true,
+                Event::Stopping => self.stopping = true,
                 Event::Paused { done, total } => {
                     self.pausing = false;
                     self.paused = true;
@@ -271,6 +291,7 @@ impl App {
                     motors_released,
                 } => {
                     self.pausing = false;
+                    self.stopping = false;
                     self.paused = false;
                     if let Some(plan) = &self.plan {
                         self.ops_done = plan.ops.len();
@@ -293,9 +314,19 @@ impl App {
                 }
                 Event::Aborted(cause) => {
                     self.pausing = false;
+                    self.stopping = false;
                     self.paused = false;
                     self.note = Some(self.stop_note(cause));
                     self.disarm(cause);
+                    // A cutoff leaves a plot to be carried on: the sheet is
+                    // half-drawn and the machine stands exactly where the plan
+                    // left it. A stop asked for by hand means the opposite —
+                    // `S` then `enter` is how you start over (§9) — and an
+                    // error abort is not something to continue into blindly.
+                    self.stopped_at = match cause {
+                        StopCause::Timer | StopCause::Distance => Some(self.ops_done),
+                        StopCause::Asked => None,
+                    };
                 }
                 Event::Error(err) => self.note = Some(format!("error: {err}")),
             }
@@ -396,7 +427,15 @@ impl App {
             Action::DisableMotors => self.worker.send(Command::DisableMotors),
             Action::Pause => self.worker.send(Command::Pause),
             Action::Resume => self.worker.send(Command::Resume),
-            Action::Stop => self.worker.send(Command::Stop),
+            Action::Stop => {
+                // Also the way back to a fresh start: with nothing running,
+                // `S` is what tells the app to forget the plot a cutoff cut
+                // short, so the next `enter` lays the drawing down again.
+                if self.stopped_at.take().is_some() {
+                    tracing::info!("carry-on point dropped; enter starts over");
+                }
+                self.worker.send(Command::Stop);
+            }
             Action::PanicStop => self.worker.send(Command::EmergencyStop),
             Action::Jog { dx, dy } => self.jog(dx, dy),
             Action::StepBigger => {
@@ -407,6 +446,8 @@ impl App {
             Action::Frame => self.trace_frame(),
             Action::CycleStopTimer => self.cycle_stop_timer(),
             Action::CycleStopDistance => self.cycle_stop_distance(),
+            Action::SetStopDistance => self.open_stop_distance_prompt(),
+            Action::CancelPrompt => self.cancel_stop_distance_prompt(),
             Action::ToggleStrokes => {
                 self.strokes_panel = !self.strokes_panel;
                 tracing::info!(visible = self.strokes_panel, "stroke list");
@@ -422,14 +463,26 @@ impl App {
             Action::Input(c) => {
                 if let Some(line) = &mut self.console {
                     line.push(c);
+                } else if let Some(cm) = &mut self.stop_distance_input {
+                    // Only what can be part of a distance: the prompt hands
+                    // every printable key over (so `S` is text, not STOP), and
+                    // dropping the rest here beats refusing the line later.
+                    if c.is_ascii_digit() || c == '.' || c == ',' {
+                        cm.push(c);
+                    }
                 }
             }
             Action::Backspace => {
                 if let Some(line) = &mut self.console {
                     line.pop();
+                } else if let Some(cm) = &mut self.stop_distance_input {
+                    cm.pop();
                 }
             }
-            Action::Submit => self.submit_console(),
+            Action::Submit => match self.console {
+                Some(_) => self.submit_console(),
+                None => self.submit_stop_distance(),
+            },
             Action::ToggleHelp => self.help = !self.help,
         }
         true
@@ -517,6 +570,12 @@ impl App {
         self.resume_from
     }
 
+    /// Where a cutoff cut this session's plot short, while `enter` still means
+    /// "carry that plot on".
+    pub fn stopped_at(&self) -> Option<usize> {
+        self.stopped_at
+    }
+
     /// What `enter` does: resume a held plan, or start the loaded one.
     ///
     /// At a paused machine "draw the loaded SVG" can only mean "carry on" —
@@ -533,12 +592,22 @@ impl App {
     }
 
     /// Start drawing the loaded plan, if there is one, arming the safety timer.
+    ///
+    /// Three things `enter` can mean, and they differ in where the drawing goes
+    /// and what the machine does first:
+    /// - **carry on** from a cutoff that cut this session's plot short: the plan
+    ///   and its job stand, the head is where the plan left it, nothing homes;
+    /// - **resume** a job found on disk: the same plan, but its position is only
+    ///   a number in a file, so the preamble homes first (§3.4);
+    /// - **fresh**: the drawing is laid down from where the head is now.
     fn start_plot(&mut self) {
+        let carry_on = self.stopped_at;
+        let resume = self.resume_from;
         // A fresh plot is laid down from where the head is *now*: jog to the
         // corner of the sheet, press enter, and the drawing starts under the
-        // pen. A resume keeps the plan it was interrupted with — re-placing it
-        // would tear the drawing in two.
-        if self.resume_from.is_none() && !self.shapes.is_empty() {
+        // pen. Carrying on or resuming keeps the plan it was interrupted with —
+        // re-placing it would tear the drawing in two.
+        if self.may_place_at_head() {
             self.place_at_head();
             // Off-field first, stale head second: when both apply the stale
             // head is the reason the bounds look wrong, so it is the note worth
@@ -552,11 +621,23 @@ impl App {
             self.note = Some("no SVG loaded".to_owned());
             return;
         };
-        tracing::info!(ops = plan.ops.len(), "starting plot");
+        // Consumed only now: this `enter` is the one that acts on them, and
+        // bailing out above must leave them for the next.
+        self.stopped_at = None;
+        self.resume_from = None;
 
-        // Resuming an accepted job continues its own directory from the
-        // committed index; a fresh plot starts a new job at 0 (§3.4).
-        let start_index = self.resume_from.take().unwrap_or(0);
+        // Carrying on or resuming continues the job's own directory from where
+        // it stopped; a fresh plot starts a new job at 0 (§3.4).
+        let start = match (carry_on, resume) {
+            (Some(index), _) => Start::Carry { index },
+            (None, Some(index)) => Start::Resume { index },
+            (None, None) => Start::Fresh,
+        };
+        let start_index = match start {
+            Start::Fresh => 0,
+            Start::Carry { index } | Start::Resume { index } => index,
+        };
+        tracing::info!(ops = plan.ops.len(), ?start, "starting plot");
         if start_index == 0 {
             self.job = self.create_job(&plan);
         }
@@ -569,7 +650,7 @@ impl App {
         self.worker.send(Command::RunPlan {
             plan,
             progress,
-            start_index,
+            start,
         });
         // Arm the safety cutoffs, if set, right after the plan starts (§2.8).
         if let Some(minutes) = self.stop_timer_minutes() {
@@ -590,7 +671,7 @@ impl App {
     /// The plan is placed at the head first, exactly as `Enter` would, so what
     /// the frame traces is what a plot started right now would fill.
     fn trace_frame(&mut self) {
-        if self.resume_from.is_none() && !self.shapes.is_empty() {
+        if self.may_place_at_head() {
             self.place_at_head();
         }
         let Some(outline) = self.plan.as_ref().and_then(Plan::frame_outline) else {
@@ -642,6 +723,17 @@ impl App {
         }
     }
 
+    /// Whether the drawing may be laid down afresh at the head.
+    ///
+    /// Not while a plan is waiting to be carried on or resumed: that plan is
+    /// half on the paper, and moving it under the head would tear the drawing in
+    /// two — the half already drawn in one place, the rest in another. `f` asks
+    /// this as well as `enter`, because looking at where the drawing would land
+    /// must not be what moves it.
+    fn may_place_at_head(&self) -> bool {
+        self.stopped_at.is_none() && self.resume_from.is_none() && !self.shapes.is_empty()
+    }
+
     /// Rebuild the plan with the drawing anchored at the head's position, and
     /// refresh what the UI derives from it.
     fn place_at_head(&mut self) {
@@ -684,11 +776,17 @@ impl App {
     }
 
     /// Cycle the distance cutoff: off → 0.5 → 1 → 5 m → off.
+    ///
+    /// A distance typed with `M` is not a rung on that ladder, so `m` clears it
+    /// instead of guessing which rung it is nearest: one press is back to off,
+    /// the next starts the ladder again.
     fn cycle_stop_distance(&mut self) {
         self.stop_distance = match self.stop_distance {
-            None => Some(0),
-            Some(i) if i + 1 < STOP_DISTANCE_MM.len() => Some(i + 1),
-            Some(_) => None,
+            None => Some(STOP_DISTANCE_MM[0]),
+            Some(mm) => match STOP_DISTANCE_MM.iter().position(|rung| *rung == mm) {
+                Some(i) => STOP_DISTANCE_MM.get(i + 1).copied(),
+                None => None,
+            },
         };
         match self.stop_distance_mm() {
             Some(mm) => tracing::info!(mm, "distance cutoff armed"),
@@ -696,9 +794,79 @@ impl App {
         }
     }
 
+    /// Open the prompt that takes a distance stop in centimetres (`M`).
+    ///
+    /// Centimetres because that is the unit the drawing is judged in — "let it
+    /// run 30 cm and look at the ink" — and the one the ladder on `m` is
+    /// already labelled with.
+    fn open_stop_distance_prompt(&mut self) {
+        tracing::info!("distance stop prompt open");
+        self.stop_distance_input = Some(String::new());
+    }
+
+    /// Drop the prompt, leaving whatever was armed before it alone.
+    fn cancel_stop_distance_prompt(&mut self) {
+        tracing::info!("distance stop prompt cancelled");
+        self.stop_distance_input = None;
+    }
+
+    /// Take the typed centimetres and arm the cutoff — or switch it off, when
+    /// the line is empty.
+    ///
+    /// An empty line means off because that is the shortest way back from
+    /// "stop after 30 cm" to "draw the whole thing", and the prompt says so.
+    fn submit_stop_distance(&mut self) {
+        let Some(typed) = self.stop_distance_input.take() else {
+            return;
+        };
+        let typed = typed.trim().to_owned();
+        if typed.is_empty() {
+            self.stop_distance = None;
+            tracing::info!("distance cutoff off");
+            self.note = Some("distance stop off".to_owned());
+            return;
+        }
+        let Some(cm) = parse_cm(&typed) else {
+            tracing::warn!(typed, "not a distance in cm");
+            self.note = Some(format!("\"{typed}\" is not a distance in cm"));
+            return;
+        };
+        let mm = cm * 10.0;
+        self.stop_distance = Some(mm);
+        tracing::info!(mm, "distance cutoff armed");
+        // A plot already under way takes it now rather than at the next
+        // `enter`: the point of typing a distance mid-plot is this plot. The
+        // worker counts the budget from the travel done so far, so it is "stop
+        // after this much more", and the note says that rather than leave the
+        // operator to work out which.
+        if matches!(self.activity, Activity::Drawing { .. }) {
+            self.worker
+                .send(Command::StopAfterDistance { mm, pen_up: true });
+            self.note = Some(format!("distance stop {} from here", ui::fmt_dist(mm)));
+            return;
+        }
+        let mut note = format!("distance stop at {}", ui::fmt_dist(mm));
+        // A cutoff further than the drawing goes never fires, which from the
+        // operator's chair looks exactly like one that was never armed.
+        if let Some(est) = self.estimate {
+            if mm > est.total_mm() {
+                note.push_str(&format!(
+                    " - the drawing only travels {}",
+                    ui::fmt_dist(est.total_mm())
+                ));
+            }
+        }
+        self.note = Some(note);
+    }
+
     /// The armed distance cutoff in mm, if any.
     pub fn stop_distance_mm(&self) -> Option<f64> {
-        self.stop_distance.map(|i| STOP_DISTANCE_MM[i])
+        self.stop_distance
+    }
+
+    /// The centimetres typed so far at the distance-stop prompt, for the UI.
+    pub fn stop_distance_prompt(&self) -> Option<&str> {
+        self.stop_distance_input.as_deref()
     }
 
     /// What to put on screen when a plan ends early. A cutoff names itself and
@@ -711,9 +879,12 @@ impl App {
                 Some(m) => format!("stopped by the {m}m safety timer (t: off)"),
                 None => "stopped by the safety timer".to_owned(),
             },
+            // "at the end of the shape" is not decoration: the cutoff draws
+            // the shape out, so the travel counter beside this note reads
+            // *more* than the distance that was armed.
             StopCause::Distance => match self.stop_distance_mm() {
                 Some(mm) => format!(
-                    "stopped by the {} distance cutoff (m: off)",
+                    "stopped by the {} distance cutoff at the end of the shape (m: off)",
                     ui::fmt_dist(mm)
                 ),
                 None => "stopped by the distance cutoff".to_owned(),
@@ -790,9 +961,10 @@ impl App {
 
     /// Which key map applies right now — the console makes input textual.
     fn mode(&self) -> Mode {
-        match self.console {
-            Some(_) => Mode::Console,
-            None => Mode::Navigation,
+        match (&self.console, &self.stop_distance_input) {
+            (Some(_), _) => Mode::Console,
+            (None, Some(_)) => Mode::Prompt,
+            (None, None) => Mode::Navigation,
         }
     }
 
@@ -826,6 +998,11 @@ impl App {
     /// Whether a pause is waiting for the current shape to finish.
     pub fn pausing(&self) -> bool {
         self.pausing
+    }
+
+    /// Whether the distance cutoff is waiting for the current shape to finish.
+    pub fn stopping(&self) -> bool {
+        self.stopping
     }
 
     /// Press the pen harder (positive) or more lightly, and say where it ended
@@ -899,6 +1076,17 @@ fn pen_depth_of(event: &TermEvent) -> Option<f32> {
         Some(Action::PenShallower) => Some(-PEN_Z_STEP_MM),
         _ => None,
     }
+}
+
+/// A typed distance in centimetres: a positive, finite number, written with
+/// either separator.
+///
+/// The comma is accepted because the number is typed on the keyboard in front
+/// of the plotter, not parsed from a file — and a cutoff refused over the shape
+/// of its decimal point would be read as "the key is broken".
+fn parse_cm(typed: &str) -> Option<f64> {
+    let cm: f64 = typed.replace(',', ".").parse().ok()?;
+    (cm.is_finite() && cm > 0.0).then_some(cm)
 }
 
 fn jog_of(event: &TermEvent) -> Option<(i8, i8)> {
@@ -1131,6 +1319,185 @@ mod tests {
         )
     }
 
+    /// Two separate shapes, so a distance cutoff has a shape boundary to stop
+    /// at and a whole shape left ahead of it.
+    fn app_with_two_shapes() -> App {
+        let driver = Driver::new(Connection {
+            transport: Box::new(MockTransport::new()),
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+        });
+        let worker = Worker::spawn(driver);
+        let machine = MachineState {
+            version: "DrawCore V2.10".to_owned(),
+            port: "mock".to_owned(),
+            pen: Pen::Up,
+            position: Point::new(0.0, 0.0),
+            position_trusted: true,
+        };
+        let shapes = vec![
+            Shape::unlabelled(vec![Point::new(0.0, 0.0), Point::new(60.0, 0.0)]),
+            Shape::unlabelled(vec![Point::new(0.0, 20.0), Point::new(60.0, 20.0)]),
+        ];
+        App::new(
+            worker,
+            machine,
+            test_profile(),
+            shapes,
+            None,
+            None,
+            LogRing::new(),
+        )
+    }
+
+    /// Fold worker events until `reached` accepts the app's state, or give up.
+    /// The worker runs on its own thread, so the state has to be waited for.
+    fn settles(app: &mut App, reached: impl Fn(&App) -> bool) -> bool {
+        for _ in 0..400 {
+            app.drain_worker_events();
+            if reached(app) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// Arm 2 cm, draw, and let the cutoff stop the plot at the end of the first
+    /// shape.
+    fn app_stopped_by_a_cutoff() -> App {
+        let mut app = app_with_two_shapes();
+        app.on_key(press('M'));
+        app.on_key(press('2'));
+        app.on_key(key(KeyCode::Enter)); // arm 2 cm
+        app.on_key(key(KeyCode::Enter)); // draw
+
+        assert!(
+            settles(&mut app, |app| app.stopped_at().is_some()),
+            "the cutoff never stopped the plot"
+        );
+        app
+    }
+
+    /// The bug this fixes: after a cutoff stopped the plot, `enter` laid the
+    /// whole drawing down again *from the head* — which by then sits mid-sheet.
+    /// The carriage set off across the paper and redrew the drawing in the
+    /// wrong place. `enter` has to carry the stopped plot on instead.
+    #[test]
+    fn enter_after_a_cutoff_carries_the_plot_on_where_it_stopped() {
+        let mut app = app_stopped_by_a_cutoff();
+        let stopped_at = app.stopped_at().expect("a carry-on point");
+        let start = app.plan().expect("a plan").strokes[0].start;
+
+        // The head is no longer at the drawing's origin — the plot left it
+        // mid-sheet, and jogging to look at the ink moves it further.
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        assert!(settles(&mut app, |app| app.machine().position.x > 0.0));
+
+        app.on_key(key(KeyCode::Enter));
+
+        let after = app.plan().expect("a plan").strokes[0].start;
+        assert!(
+            close(after, start),
+            "the drawing was laid down again at {after:?} instead of carrying on from {start:?}"
+        );
+        assert_eq!(
+            app.ops_done, stopped_at,
+            "the run went back to the top of the plan"
+        );
+        assert_eq!(
+            app.stopped_at(),
+            None,
+            "the carry-on point survived the enter that used it"
+        );
+    }
+
+    /// Looking at where the drawing lands must not be what moves it: `f` places
+    /// the drawing at the head, and doing that to a plot waiting to be carried
+    /// on would tear the sheet in two — half drawn here, the rest over there.
+    #[test]
+    fn the_frame_leaves_a_plot_waiting_to_be_carried_on_where_it_is() {
+        let mut app = app_stopped_by_a_cutoff();
+        let start = app.plan().expect("a plan").strokes[0].start;
+
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        assert!(settles(&mut app, |app| app.machine().position.x > 0.0));
+        app.on_key(press('f'));
+
+        let after = app.plan().expect("a plan").strokes[0].start;
+        assert!(
+            close(after, start),
+            "the frame moved the drawing to {after:?} from {start:?}"
+        );
+        assert!(
+            app.stopped_at().is_some(),
+            "the frame ate the carry-on point"
+        );
+    }
+
+    /// `S` is the way back to a fresh sheet: it drops the carry-on point, so the
+    /// next `enter` lays the drawing down under the pen again (§9).
+    #[test]
+    fn stop_then_enter_starts_the_drawing_over() {
+        let mut app = app_stopped_by_a_cutoff();
+
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        assert!(settles(&mut app, |app| app.machine().position.x > 0.0));
+        let head = app.machine().position;
+
+        app.on_key(press('S'));
+        assert_eq!(app.stopped_at(), None, "S kept the carry-on point");
+
+        app.on_key(key(KeyCode::Enter));
+        let start = app.plan().expect("a plan").strokes[0].start;
+        assert!(
+            close(start, head),
+            "a fresh plot starts at the head {head:?}, not {start:?}"
+        );
+        assert_eq!(app.ops_done, 0, "starting over did not start at the top");
+    }
+
+    /// A stop asked for by hand is not a plot to carry on — it is how you throw
+    /// the run away — so it leaves no carry-on point behind.
+    #[test]
+    fn a_manual_stop_leaves_nothing_to_carry_on() {
+        let mut app = app_with_two_shapes();
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(press('S'));
+
+        assert!(
+            settles(&mut app, |app| app.note().is_some()),
+            "the stop was never reported"
+        );
+        assert_eq!(app.stopped_at(), None, "a manual stop offered to carry on");
+    }
+
+    /// The hint has to stay on screen while `enter` means "carry on": the note
+    /// that said what stopped the plot is gone at the next keypress, and by then
+    /// nothing else would say whether `enter` continues or redraws the sheet.
+    #[test]
+    fn the_status_bar_says_enter_carries_on() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let app = app_stopped_by_a_cutoff();
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let status: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+
+        assert!(
+            status.contains("enter carries on"),
+            "nothing says what enter will do: {status}"
+        );
+    }
+
     /// The drawing follows the head: jog to the corner of the sheet, press
     /// enter, and the plot starts under the pen — not in the middle of the A0
     /// field, which is where fitting used to centre it.
@@ -1153,6 +1520,223 @@ mod tests {
             "the note does not say what stopped the plot: {note}"
         );
         assert_eq!(app.stop_distance_mm(), None, "the cutoff stayed armed");
+    }
+
+    /// The prompt has to reach the screen, not just the state: `M` opens a row
+    /// of its own in the layout, the same one the console takes.
+    #[test]
+    fn the_open_prompt_takes_a_row_on_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        app.on_key(press('3'));
+        app.on_key(press('0'));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("stop after 30"),
+            "the prompt is open but nowhere on screen:\n{screen}"
+        );
+    }
+
+    /// A spent budget waiting on a long shape can take minutes. The status bar
+    /// has to say that, or it reads as a cutoff that was missed — the same
+    /// reason a pending pause says so.
+    #[test]
+    fn a_waiting_cutoff_says_so_in_the_status_bar() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = app_with_a_drawing();
+        app.activity = Activity::Drawing {
+            done: 10,
+            total: 100,
+            distance_mm: 120.0,
+            elapsed_secs: 4.0,
+        };
+        app.stopping = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let status: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+
+        assert!(
+            status.contains("stopping after this shape"),
+            "the wait is invisible: {status}"
+        );
+    }
+
+    /// The point of the prompt: any distance, not just the three on the ladder.
+    #[test]
+    fn a_typed_distance_arms_the_cutoff_in_centimetres() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        assert_eq!(
+            app.stop_distance_prompt(),
+            Some(""),
+            "the prompt never opened"
+        );
+        app.on_key(press('2'));
+        app.on_key(press('5'));
+        assert_eq!(
+            app.stop_distance_prompt(),
+            Some("25"),
+            "the digits are not on screen"
+        );
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.stop_distance_mm(), Some(250.0), "25 cm is 250 mm");
+        assert_eq!(app.stop_distance_prompt(), None, "the prompt stayed open");
+    }
+
+    /// The number is typed at the plotter, so both decimal separators work and
+    /// anything that is not part of a number never reaches the line.
+    #[test]
+    fn the_prompt_takes_a_comma_and_drops_the_rest() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        for c in ['1', 'x', '2', ',', '5'] {
+            app.on_key(press(c));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.stop_distance_mm(), Some(125.0), "12,5 cm is 125 mm");
+    }
+
+    /// The reason the prompt is its own mode: while it is open, the keys that
+    /// would stop the plot or drop the session are just text — and text that
+    /// is not a digit is dropped.
+    #[test]
+    fn command_keys_typed_into_the_prompt_do_not_fire() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        app.on_key(press('S'));
+        app.on_key(press('q'));
+        app.on_key(press('5'));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(!app.should_quit, "q at the prompt quit the app");
+        assert_eq!(app.stop_distance_mm(), Some(50.0), "only the 5 counted");
+    }
+
+    /// Enter on an empty line is the way back to drawing the whole thing.
+    #[test]
+    fn an_empty_prompt_switches_the_cutoff_off() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('m'));
+        assert!(app.stop_distance_mm().is_some());
+
+        app.on_key(press('M'));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.stop_distance_mm(), None, "the cutoff stayed armed");
+    }
+
+    /// Esc drops the prompt without touching what was armed before it.
+    #[test]
+    fn cancelling_the_prompt_leaves_the_armed_cutoff_alone() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('m'));
+        app.on_key(press('M'));
+        app.on_key(press('7'));
+        app.on_key(key(KeyCode::Esc));
+
+        assert_eq!(app.stop_distance_mm(), Some(STOP_DISTANCE_MM[0]));
+        assert_eq!(app.stop_distance_prompt(), None, "the prompt stayed open");
+    }
+
+    /// A line that is not a distance says so instead of arming something the
+    /// operator did not ask for.
+    #[test]
+    fn a_line_that_is_not_a_distance_arms_nothing() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        app.on_key(press('.'));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.stop_distance_mm(), None);
+        let note = app.note().unwrap_or_default();
+        assert!(note.contains("not a distance"), "silent refusal: {note}");
+    }
+
+    /// A cutoff further than the drawing goes never fires — which looks exactly
+    /// like one that was never armed, so the note says it up front.
+    #[test]
+    fn a_cutoff_past_the_end_of_the_drawing_says_so() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        for c in ['9', '9', '9'] {
+            app.on_key(press(c));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        let note = app.note().unwrap_or_default();
+        assert!(note.contains("only travels"), "no warning: {note}");
+    }
+
+    /// Typed mid-plot, the cutoff belongs to the plot that is running: the
+    /// worker counts it from the travel done so far, and the note has to say
+    /// so or "stop after 5 cm" reads as 5 cm from the start of the sheet.
+    #[test]
+    fn a_distance_typed_mid_plot_counts_from_there() {
+        let mut app = app_with_a_drawing();
+        app.activity = Activity::Drawing {
+            done: 10,
+            total: 100,
+            distance_mm: 120.0,
+            elapsed_secs: 4.0,
+        };
+        app.on_key(press('M'));
+        app.on_key(press('5'));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.stop_distance_mm(), Some(50.0));
+        let note = app.note().unwrap_or_default();
+        assert!(
+            note.contains("from here"),
+            "the note hides the datum: {note}"
+        );
+    }
+
+    /// `m` has three rungs and a typed value is not one of them, so one press
+    /// clears it rather than jumping to whichever rung looks nearest.
+    #[test]
+    fn the_cycle_key_clears_a_typed_distance() {
+        let mut app = app_with_a_drawing();
+        app.on_key(press('M'));
+        app.on_key(press('7'));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.stop_distance_mm(), Some(70.0));
+
+        app.on_key(press('m'));
+        assert_eq!(app.stop_distance_mm(), None, "m kept a typed distance");
+        app.on_key(press('m'));
+        assert_eq!(app.stop_distance_mm(), Some(STOP_DISTANCE_MM[0]));
+    }
+
+    #[test]
+    fn centimetres_are_parsed_or_refused() {
+        assert_eq!(parse_cm("30"), Some(30.0));
+        assert_eq!(parse_cm("12.5"), Some(12.5));
+        assert_eq!(parse_cm("12,5"), Some(12.5));
+        assert_eq!(parse_cm("0"), None, "a cutoff at nothing is not a cutoff");
+        assert_eq!(parse_cm("-5"), None);
+        assert_eq!(parse_cm("inf"), None);
+        assert_eq!(parse_cm("cm"), None);
     }
 
     /// The timer is the same bargain, and a stop asked for by hand is not: it

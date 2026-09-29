@@ -15,6 +15,8 @@ pub enum Mode {
     Navigation,
     /// The raw G-code console: printable keys are text.
     Console,
+    /// A one-line value prompt (the distance stop): printable keys are text.
+    Prompt,
 }
 
 /// What the user asked for, independent of which key produced it.
@@ -47,6 +49,10 @@ pub enum Action {
     CycleStopTimer,
     /// Cycle the distance stop-and-pen-up cutoff (off / … / off).
     CycleStopDistance,
+    /// Open the prompt for a distance stop typed in centimetres.
+    SetStopDistance,
+    /// Close a value prompt without arming anything.
+    CancelPrompt,
     /// Pause the running plan once the shape being drawn is finished.
     Pause,
     /// Resume a paused plan.
@@ -116,10 +122,10 @@ pub const NAVIGATION_BINDINGS: &[Binding] = &[
         description: "safety timer: off / 1 / 5 / 15 min (stop + pen up)",
     },
     Binding {
-        keys: "m",
+        keys: "m  /  M",
         probe: Some(KeyCode::Char('m')),
         action: Action::CycleStopDistance,
-        description: "distance stop: off / 50 / 100 / 500 cm (stop + pen up)",
+        description: "stop at the shape's end after 50/100/500cm - M: any cm",
     },
     Binding {
         keys: "[  /  PgUp",
@@ -246,6 +252,7 @@ pub fn action_for(mode: Mode, key: &KeyEvent) -> Option<Action> {
     match mode {
         Mode::Navigation => navigation(key),
         Mode::Console => console(key),
+        Mode::Prompt => prompt(key),
     }
 }
 
@@ -273,6 +280,7 @@ fn navigation(key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::Frame),
         KeyCode::Char('t') => Some(Action::CycleStopTimer),
         KeyCode::Char('m') => Some(Action::CycleStopDistance),
+        KeyCode::Char('M') => Some(Action::SetStopDistance),
         KeyCode::Esc => Some(Action::Pause),
         KeyCode::Char('r') => Some(Action::Resume),
         KeyCode::Char('S') => Some(Action::Stop),
@@ -295,6 +303,23 @@ fn console(key: &KeyEvent) -> Option<Action> {
         KeyCode::Enter => Some(Action::Submit),
         KeyCode::Backspace => Some(Action::Backspace),
         // Everything printable is text — including q, S, space and brackets.
+        KeyCode::Char(c) => Some(Action::Input(c)),
+        _ => None,
+    }
+}
+
+/// A one-line value prompt: digits are text, Enter takes the value, Esc drops
+/// it. Same bargain as the console — `S` typed into "stop after 5 cm" must not
+/// fire STOP — so it gets the same treatment rather than a second one.
+fn prompt(key: &KeyEvent) -> Option<Action> {
+    // Panic stop fires while typing here too.
+    if let Some(action) = panic_stop(key) {
+        return Some(action);
+    }
+    match key.code {
+        KeyCode::Esc => Some(Action::CancelPrompt),
+        KeyCode::Enter => Some(Action::Submit),
+        KeyCode::Backspace => Some(Action::Backspace),
         KeyCode::Char(c) => Some(Action::Input(c)),
         _ => None,
     }
@@ -405,9 +430,37 @@ mod tests {
         assert_eq!(console_key(KeyCode::Esc), Some(Action::CloseConsole));
     }
 
+    fn prompt_key(code: KeyCode) -> Option<Action> {
+        action_for(Mode::Prompt, &press(code))
+    }
+
+    /// `M` opens the prompt; the cycle key beside it is untouched.
+    #[test]
+    fn a_typed_distance_stop_has_its_own_key() {
+        assert_eq!(nav(KeyCode::Char('M')), Some(Action::SetStopDistance));
+        assert_eq!(nav(KeyCode::Char('m')), Some(Action::CycleStopDistance));
+    }
+
+    /// The same reason the console mode exists: a value being typed is text,
+    /// including the keys that would otherwise stop the plot or quit.
+    #[test]
+    fn keys_typed_into_a_prompt_are_text() {
+        assert_eq!(prompt_key(KeyCode::Char('5')), Some(Action::Input('5')));
+        assert_eq!(prompt_key(KeyCode::Char('.')), Some(Action::Input('.')));
+        assert_eq!(prompt_key(KeyCode::Char('S')), Some(Action::Input('S')));
+        assert_eq!(prompt_key(KeyCode::Char('q')), Some(Action::Input('q')));
+    }
+
+    #[test]
+    fn prompt_editing_keys() {
+        assert_eq!(prompt_key(KeyCode::Enter), Some(Action::Submit));
+        assert_eq!(prompt_key(KeyCode::Backspace), Some(Action::Backspace));
+        assert_eq!(prompt_key(KeyCode::Esc), Some(Action::CancelPrompt));
+    }
+
     #[test]
     fn panic_stop_fires_from_both_modes_including_ctrl_x() {
-        for mode in [Mode::Navigation, Mode::Console] {
+        for mode in [Mode::Navigation, Mode::Console, Mode::Prompt] {
             for code in [KeyCode::Char('c'), KeyCode::Char('x')] {
                 assert_eq!(
                     action_for(mode, &KeyEvent::new(code, KeyModifiers::CONTROL)),

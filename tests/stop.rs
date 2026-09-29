@@ -11,7 +11,7 @@ use plotly::geometry::{Placement, Point, Transform};
 use plotly::plan::{Op, Plan, PlanSettings};
 use plotly::plotter::driver::Driver;
 use plotly::plotter::mock::MockTransport;
-use plotly::plotter::worker::{Command, Event, StopCause, Worker};
+use plotly::plotter::worker::{Command, Event, Start, StopCause, Worker};
 use plotly::plotter::Connection;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -79,7 +79,7 @@ fn stop_between_ops_halts_the_plan_and_lifts_the_pen() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     std::thread::sleep(Duration::from_millis(20)); // let a few ops go out
     worker.send(Command::Stop);
@@ -143,7 +143,7 @@ fn pause_finishes_the_shape_being_drawn_before_holding() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     // Ask only once the pen is provably on the paper, inside the first shape.
     let asked_at = wait_until(&worker, &plan, |done| {
@@ -192,7 +192,7 @@ fn pause_with_the_pen_up_holds_at_once() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     wait_until(&worker, &plan, |done| done >= 3);
     worker.send(Command::Pause);
@@ -214,7 +214,7 @@ fn resume_after_a_pause_finishes_the_plan() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     wait_until(&worker, &plan, |done| {
         plan.stroke_progress(done).current == Some(0)
@@ -244,7 +244,7 @@ fn resume_before_the_shape_ends_calls_the_pause_off() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     wait_until(&worker, &plan, |done| {
         plan.stroke_progress(done).current == Some(0)
@@ -278,7 +278,7 @@ fn panic_stop_aborts_with_a_soft_reset() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::EmergencyStop);
@@ -303,7 +303,7 @@ fn a_timed_stop_lifts_the_pen_and_ends_the_plan() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     // Accelerated "time": a 30 ms cutoff, with pen-up. The plan (~150 ops at
     // 3 ms/read) runs well past it, so it stops partway.
@@ -335,7 +335,7 @@ fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
     worker.send(Command::RunPlan {
         plan: long_plan(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     worker.send(Command::StopAfter {
         after: Duration::from_millis(30),
@@ -358,17 +358,21 @@ fn a_timed_stop_without_pen_up_leaves_the_pen_down() {
     assert_eq!(pen_ups, 0, "pen was lifted despite pen_up=false");
 }
 
+/// The budget is spent mid-shape, so the cutoff draws that shape out to its
+/// end before stopping: a shape cut in half leaves a line ending in the middle
+/// of nowhere, which no amount of resuming turns back into the drawing.
 #[test]
-fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
+fn a_distance_cutoff_finishes_the_shape_before_stopping() {
     let (mut worker, sent, _rt) = slow_worker();
-    let total = long_plan().ops.len();
+    let plan = two_shape_plan();
+    let total = plan.ops.len();
 
     worker.send(Command::RunPlan {
-        plan: long_plan(),
+        plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
-    // The stroke is ~400 mm; stop after 100 mm of travel, pen up.
+    // Each stroke is ~400 mm; a 100 mm budget is spent well inside the first.
     worker.send(Command::StopAfterDistance {
         mm: 100.0,
         pen_up: true,
@@ -379,7 +383,24 @@ fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
         matches!(end, Some(Event::Aborted(StopCause::Distance))),
         "the stop has to name the cutoff, or the status bar cannot: {end:?}"
     );
-    assert!(done < total, "stopped after {done} of {total} ops");
+
+    // Nothing is half-drawn at the stop, and the op just executed was the
+    // pen-up that closes a shape.
+    let progress = plan.stroke_progress(done);
+    assert_eq!(
+        progress.current, None,
+        "stopped inside a shape ({progress:?}) instead of at its end"
+    );
+    assert_eq!(
+        plan.ops.get(done - 1),
+        Some(&Op::PenUp),
+        "the op before the stop was not a shape's pen-up"
+    );
+    assert!(progress.done >= 1, "no shape finished: {progress:?}");
+    assert!(
+        done < total,
+        "stopped after {done} of {total} ops (not all)"
+    );
 
     worker.shutdown();
     let sent = sent.lock().unwrap();
@@ -387,6 +408,65 @@ fn a_distance_cutoff_stops_partway_and_lifts_the_pen() {
         sent.iter().any(|l| l.contains("Z0.500")),
         "no pen-up on the distance stop: {sent:?}"
     );
+}
+
+/// The shape always wins, and that cuts both ways: a budget spent inside the
+/// *last* shape has nothing left to stop, so the plan runs to its end and ends
+/// as a finished plot rather than an abort.
+#[test]
+fn a_budget_spent_in_the_last_shape_lets_the_plan_finish() {
+    let (mut worker, _sent, _rt) = slow_worker();
+
+    worker.send(Command::RunPlan {
+        plan: long_plan(),
+        progress: None,
+        start: Start::Fresh,
+    });
+    // One ~400 mm stroke, and the budget is spent a quarter of the way in.
+    worker.send(Command::StopAfterDistance {
+        mm: 100.0,
+        pen_up: true,
+    });
+
+    let (end, _done) = wait_for_end(&worker);
+    assert!(
+        matches!(end, Some(Event::PlanDone { .. })),
+        "the one shape was cut short after all: {end:?}"
+    );
+
+    worker.shutdown();
+}
+
+/// The wait is visible while it lasts: a long shape can take minutes to draw
+/// out, and a status bar that says nothing reads as a cutoff that was missed.
+#[test]
+fn the_cutoff_says_it_is_waiting_for_the_shape() {
+    let (mut worker, _sent, _rt) = slow_worker();
+
+    worker.send(Command::RunPlan {
+        plan: two_shape_plan(),
+        progress: None,
+        start: Start::Fresh,
+    });
+    worker.send(Command::StopAfterDistance {
+        mm: 100.0,
+        pen_up: true,
+    });
+
+    let mut announced = false;
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        match event {
+            Event::Stopping => announced = true,
+            Event::Aborted(_) | Event::PlanDone { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        announced,
+        "the plot stopped without ever saying why it waited"
+    );
+
+    worker.shutdown();
 }
 
 #[test]

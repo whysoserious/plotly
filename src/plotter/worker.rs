@@ -35,13 +35,14 @@ pub enum Command {
     },
     /// Send a raw line typed in the console.
     Raw(String),
-    /// Draw a plan, checkpointing progress through `progress` if given. When
-    /// `start_index > 0` this is a resume: re-home, travel to the stop point,
-    /// restore the pen, then continue from that op (§3.4).
+    /// Draw a plan, checkpointing progress through `progress` if given. Unless
+    /// it starts [`Start::Fresh`], the machine is put back at the starting op
+    /// first — travel to the point, restore the pen, and home beforehand only
+    /// when the position cannot be vouched for. See [`Start`].
     RunPlan {
         plan: Plan,
         progress: Option<ProgressWriter>,
-        start_index: usize,
+        start: Start,
     },
     /// Trace an outline with the pen up, at `feed` mm/min — the `f` frame,
     /// which shows the operator where the drawing will land before any ink is
@@ -74,6 +75,29 @@ pub enum Command {
     },
     /// Finish and let the thread exit.
     Shutdown,
+}
+
+/// Where a [`Command::RunPlan`] begins — and, just as much, what the machine
+/// has to do before the first op can be sent.
+///
+/// The three cases differ only in what is known about the carriage. Absolute
+/// coordinates make the ops themselves safe to re-send from anywhere (§6); what
+/// they cannot tell us is whether the head is where the plan left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// From the top of the plan.
+    Fresh,
+    /// Carry on from `index` in the same session that stopped there — a cutoff,
+    /// or a plan the operator stopped and then asked to continue. The position
+    /// is still known, so **nothing is homed**: the head travels back to the
+    /// op's point (a no-op if it never left), the pen goes back to where the
+    /// plan had it, and the rest is sent. Homing here would drive the head to
+    /// the far corner for ~25 s and come back for nothing.
+    Carry { index: usize },
+    /// Resume `index` from a position nobody can vouch for — a restart, a
+    /// crash, a power cut. `$H` first for a firm origin from the endstops, then
+    /// travel to the point and restore the pen (§3.4).
+    Resume { index: usize },
 }
 
 /// A snapshot of what the worker knows, shipped whenever it changes.
@@ -120,6 +144,10 @@ pub enum Event {
     /// A pause was asked for mid-shape; the plan keeps drawing until the shape
     /// ends. Sent so the UI can say why the plot has not stopped yet.
     Pausing,
+    /// The distance cutoff spent its budget mid-shape; the plan keeps drawing
+    /// until the shape ends. Sibling of [`Event::Pausing`], and separate from
+    /// it because "stopping" and "pausing" are not the same promise.
+    Stopping,
     /// The plan is paused at `done`/`total`, pen up at a shape boundary.
     Paused { done: usize, total: usize },
     /// The plan finished on its own, after `elapsed_secs` of drawing.
@@ -217,12 +245,12 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
             Command::RunPlan {
                 plan,
                 progress,
-                start_index,
+                start,
             } => {
                 let flow = run_plan(
                     &mut driver,
                     &plan,
-                    start_index,
+                    start,
                     progress.as_ref(),
                     commands,
                     events,
@@ -307,18 +335,25 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
 fn run_plan(
     driver: &mut Driver,
     plan: &Plan,
-    start_index: usize,
+    start: Start,
     progress: Option<&ProgressWriter>,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
 ) -> ControlFlow<(), Option<Command>> {
     let total = plan.ops.len();
+    let start_index = match start {
+        Start::Fresh => 0,
+        Start::Carry { index } | Start::Resume { index } => index,
+    };
 
-    // Resume: re-home to a firm origin, travel to the stop point and restore
-    // the pen before continuing from `start_index` (§6). Absolute coordinates
-    // make this safe — the ops we re-send land in exactly the same place.
+    // Not from the top: travel to the stop point and restore the pen before
+    // continuing from `start_index` (§6). Absolute coordinates make this safe —
+    // the ops we re-send land in exactly the same place. Only a resume from a
+    // position nobody can vouch for homes first; carrying on inside the session
+    // that stopped there already knows where the head is.
     if start_index > 0 {
-        if let Err(err) = resume_to(driver, plan, start_index, events) {
+        let home = matches!(start, Start::Resume { .. });
+        if let Err(err) = resume_to(driver, plan, start_index, events, home) {
             tracing::error!(%err, "resume preamble failed");
             emit(events, Event::Error(err.to_string()));
             emit(events, Event::State(snapshot(driver)));
@@ -333,6 +368,13 @@ fn run_plan(
     let mut distance_cutoff: Option<(f64, bool)> = None;
     // A pause asked for but not yet engaged — see the shape-boundary check below.
     let mut pause_pending = false;
+    // The distance budget is spent and the cutoff is waiting for the shape
+    // being drawn to end. Only tracked so the "stopping" event is sent once.
+    let mut distance_pending = false;
+    // Where the drawing stops needing a stop: past the last pen-down there is
+    // no shape left to cut short, only the plan's tail (a feed reset, a last
+    // travel). Found once here rather than scanned at every boundary.
+    let last_pen_down = plan.ops.iter().rposition(|op| *op == Op::PenDown);
     // Live metrics reported with each Progress event.
     let started = Instant::now();
     // How long the plan has spent held at a pause. Subtracted from the clock
@@ -430,12 +472,37 @@ fn run_plan(
             checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(None);
         }
+        // The distance cutoff finishes the shape it is drawing before it stops
+        // (user request; §9). Cutting a shape in half leaves a line that ends
+        // in the middle of nowhere and a blob where the pen came up — and the
+        // half-drawn shape cannot be resumed into anything but that. So the
+        // budget being spent only *arms* the stop; the plan's own `PenUp` at
+        // the end of the shape is what lets it take.
+        //
+        // Inside the *last* shape that leaves nothing to stop, and stopping
+        // anyway would end a finished drawing as an abort: no "done in …", no
+        // motors released, and a job one tail op short of complete, which the
+        // next start would offer to resume. So the cutoff stands down there and
+        // lets the plan end properly.
+        let shapes_left = last_pen_down.is_some_and(|last| index <= last);
         if let Some((budget, pen_up)) = distance_cutoff {
-            if distance_mm >= budget {
-                tracing::info!(done = index, distance_mm, pen_up, "distance stop");
-                stop_plan(driver, events, pen_up, StopCause::Distance);
-                checkpoint(progress, index, total, driver);
-                return ControlFlow::Continue(None);
+            if distance_mm >= budget && shapes_left {
+                if driver.pen() == Pen::Down {
+                    if !distance_pending {
+                        distance_pending = true;
+                        tracing::info!(
+                            done = index,
+                            distance_mm,
+                            "distance budget spent; finishing the shape first"
+                        );
+                        emit(events, Event::Stopping);
+                    }
+                } else {
+                    tracing::info!(done = index, distance_mm, pen_up, "distance stop");
+                    stop_plan(driver, events, pen_up, StopCause::Distance);
+                    checkpoint(progress, index, total, driver);
+                    return ControlFlow::Continue(None);
+                }
             }
         }
 
@@ -571,15 +638,22 @@ fn run_frame(
     ControlFlow::Continue(())
 }
 
-/// Re-establish the machine at `start_index` before resuming: home, travel to
-/// the last drawn point with the pen up, then restore the pen and feed. The op
-/// at `start_index` runs normally afterwards, and since coordinates are
-/// absolute, re-sending it lands in the same place (§6, idempotent).
+/// Re-establish the machine at `start_index` before continuing: home when the
+/// position cannot be vouched for, travel to the last drawn point with the pen
+/// up, then restore the pen and feed. The op at `start_index` runs normally
+/// afterwards, and since coordinates are absolute, re-sending it lands in the
+/// same place (§6, idempotent).
+///
+/// `home` is what separates the two callers ([`Start`]): a job picked up after
+/// a restart has nothing but a number in a file, while a plot carried on in the
+/// session that stopped it knows exactly where its head is — and homing it
+/// would be a minute of travel to the far corner and back for nothing.
 fn resume_to(
     driver: &mut Driver,
     plan: &Plan,
     start_index: usize,
     events: &Sender<Event>,
+    home: bool,
 ) -> Result<(), DriverError> {
     let state = ResumeState::at(plan, start_index);
     tracing::info!(
@@ -587,6 +661,7 @@ fn resume_to(
         x = state.pos.x,
         y = state.pos.y,
         pen_down = state.pen_down,
+        home,
         "resuming"
     );
 
@@ -594,11 +669,16 @@ fn resume_to(
     // drawing: homing takes ~25 s on this machine and drives the head to the
     // far corner, and the travel back can cross the whole sheet. Under one
     // "resuming" label that is a minute of a screen that says nothing.
-    emit(events, Event::Busy("resuming: homing".to_owned()));
-    driver.home()?; // firm origin from the endstops (§2.4)
+    if home {
+        emit(events, Event::Busy("resuming: homing".to_owned()));
+        driver.home()?; // firm origin from the endstops (§2.4)
+    }
     emit(
         events,
-        Event::Busy(format!("resuming: travelling to op {start_index}")),
+        Event::Busy(match home {
+            true => format!("resuming: travelling to op {start_index}"),
+            false => format!("carrying on from op {start_index}"),
+        }),
     );
     driver.pen_up()?;
     driver.set_feed(RESUME_TRAVEL_FEED)?;
@@ -900,7 +980,7 @@ mod tests {
         worker.send(Command::RunPlan {
             plan,
             progress: None,
-            start_index: 0,
+            start: Start::Fresh,
         });
         // A generous budget of *drawing* time, then pause for longer than it.
         worker.send(Command::StopAfter {
@@ -962,7 +1042,7 @@ mod tests {
         worker.send(Command::RunPlan {
             plan,
             progress: None,
-            start_index: 0,
+            start: Start::Fresh,
         });
 
         let mut released = None;

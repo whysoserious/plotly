@@ -15,7 +15,7 @@ use plotly::job::{self, Job};
 use plotly::plan::{Plan, PlanSettings};
 use plotly::plotter::driver::Driver;
 use plotly::plotter::mock::MockTransport;
-use plotly::plotter::worker::{Command, Event, Worker};
+use plotly::plotter::worker::{Command, Event, Start, Worker};
 use plotly::plotter::Connection;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -79,7 +79,7 @@ fn ink_of_an_uninterrupted_run(plan: &Plan) -> Vec<String> {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: None,
-        start_index: 0,
+        start: Start::Fresh,
     });
     while let Some(event) = worker.recv_timeout(TIMEOUT) {
         if matches!(event, Event::PlanDone { .. }) {
@@ -115,7 +115,7 @@ fn a_finished_plan_leaves_a_complete_progress_file() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
-        start_index: 0,
+        start: Start::Fresh,
     });
 
     // Wait for completion.
@@ -150,7 +150,7 @@ fn a_paused_plan_commits_the_exact_op_it_reached() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
-        start_index: 0,
+        start: Start::Fresh,
     });
 
     // Pause once the pen is on the paper, and note where the worker held.
@@ -207,7 +207,7 @@ fn a_paused_job_resumes_in_a_later_run_and_draws_the_same_ink() {
     first.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
-        start_index: 0,
+        start: Start::Fresh,
     });
     let mut asked = false;
     while let Some(event) = first.recv_timeout(TIMEOUT) {
@@ -239,7 +239,7 @@ fn a_paused_job_resumes_in_a_later_run_and_draws_the_same_ink() {
     second.send(Command::RunPlan {
         plan: reloaded,
         progress: Some(job.progress_writer()),
-        start_index: from,
+        start: Start::Resume { index: from },
     });
     let mut finished = false;
     while let Some(event) = second.recv_timeout(TIMEOUT) {
@@ -277,7 +277,7 @@ fn a_stopped_plan_leaves_an_unfinished_checkpoint_to_resume_from() {
     worker.send(Command::RunPlan {
         plan: plan.clone(),
         progress: Some(job.progress_writer()),
-        start_index: 0,
+        start: Start::Fresh,
     });
     std::thread::sleep(Duration::from_millis(20));
     worker.send(Command::Stop);

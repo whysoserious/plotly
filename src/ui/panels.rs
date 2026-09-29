@@ -20,16 +20,7 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
             machine.pen,
             app.pen_down_z(),
             app.jog_step_mm(),
-            // What the loaded drawing will cost, before committing paper to it.
-            match app.estimate() {
-                Some(est) => format!(
-                    " · est {} · {} ink, {} travel",
-                    fmt_time(est.secs),
-                    fmt_dist(est.draw_mm),
-                    fmt_dist(est.travel_mm)
-                ),
-                None => String::new(),
-            }
+            idle_tail(app),
         ),
         Activity::Busy(label) => format!("{label}…"),
         Activity::Drawing {
@@ -39,11 +30,15 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
             elapsed_secs,
         } => {
             let line = drawing_line(*done, *total, *distance_mm, *elapsed_secs, app.estimate());
-            // A pause waits for the shape to end, which on a long one takes a
-            // while; say so rather than look like the key was missed.
-            match app.pausing() {
-                true => format!("{line} · pausing after this shape"),
-                false => line,
+            // A pause and a spent distance budget both wait for the shape to
+            // end, which on a long one takes a while; say which is waiting,
+            // rather than look like the key was missed or the cutoff forgotten.
+            // The stop wins the row when both apply: it is the one that ends
+            // the plot.
+            match (app.stopping(), app.pausing()) {
+                (true, _) => format!("{line} · stopping after this shape"),
+                (false, true) => format!("{line} · pausing after this shape"),
+                (false, false) => line,
             }
         }
     };
@@ -64,6 +59,30 @@ pub fn status(frame: &mut Frame, area: Rect, app: &App) {
     );
     let widget = Paragraph::new(text).block(Block::bordered().title(" Status "));
     frame.render_widget(widget, area);
+}
+
+/// What follows the pen and the jog step while nothing is running.
+///
+/// Normally what the loaded drawing will cost, before committing paper to it.
+/// A plot a cutoff cut short says *that* instead, and says what the two keys
+/// do: the estimate there is for a whole run, which is exactly what `enter`
+/// will not do — and the note that said what stopped the plot is gone at the
+/// next keypress, so without this, `enter` an hour later is a guess about
+/// whether the plotter carries on or draws the sheet again.
+fn idle_tail(app: &App) -> String {
+    if app.stopped_at().is_some() {
+        let pct = app.stroke_progress().map_or(0, |p| p.percent());
+        return format!(" · stopped at {pct}% - enter carries on, S starts over");
+    }
+    match app.estimate() {
+        Some(est) => format!(
+            " · est {} · {} ink, {} travel",
+            fmt_time(est.secs),
+            fmt_dist(est.draw_mm),
+            fmt_dist(est.travel_mm)
+        ),
+        None => String::new(),
+    }
 }
 
 /// The live "drawing …" status: percent, elapsed / ETA, travel / total.
@@ -174,6 +193,15 @@ pub fn console(frame: &mut Frame, area: Rect, line: &str) {
     frame.render_widget(widget, area);
 }
 
+/// The distance-stop prompt (`M`): how far to let the plot run, in
+/// centimetres. The title carries the keys, since this row is where the
+/// operator is looking while typing.
+pub fn stop_distance_prompt(frame: &mut Frame, area: Rect, cm: &str) {
+    let widget = Paragraph::new(format!("stop after {cm}_ cm"))
+        .block(Block::bordered().title(" Distance stop (enter: arm, empty: off, esc: cancel) "));
+    frame.render_widget(widget, area);
+}
+
 /// Live tail of the in-memory log ring.
 pub fn log(frame: &mut Frame, area: Rect, app: &App) {
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -222,6 +250,33 @@ mod tests {
         assert!(line.contains("0:03 / ~0:12"), "{line}");
         assert!(line.contains("41.2cm"), "{line}");
         assert!(line.contains("1.24m"), "{line}");
+    }
+
+    /// What is being typed has to be on screen, with the keys that end it:
+    /// this row is the only place the operator looks while typing a distance.
+    #[test]
+    fn the_distance_prompt_shows_the_line_and_its_keys() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal
+            .draw(|frame| stop_distance_prompt(frame, frame.area(), "25"))
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("stop after 25"), "no typed line:\n{screen}");
+        assert!(screen.contains("cm"), "no unit:\n{screen}");
+        assert!(screen.contains("esc"), "no way out on screen:\n{screen}");
     }
 
     /// The full key overview must fit a short (24-row) terminal without clipping
