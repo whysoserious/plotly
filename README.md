@@ -184,10 +184,13 @@ Options:
       --profile <NAME>      Machine profile (idraw-a0, idraw-a1, idraw-a2, idraw-a3, idraw-a4,
                             idraw-xlx, idraw-b6, idraw-minikit). Default: read from the machine
       --simulate            Use the in-process MockTransport instead of real hardware
-      --log-file <PATH>     Log file path [default: ./plotly.log]
-      --log-level <LEVEL>   Log level; overridden by -v/-vv and --no-log [default: info]
+      --log-file <PATH>     Log file path. Default: a new file for every run in ./logs/,
+                            named after the start time and the drawing
+      --log-level <LEVEL>   Log level for the file; overridden by -v/-vv and --no-log. The
+                            default records every line on the wire, so a plot can be
+                            debugged afterwards [default: trace]
                             [possible values: off, info, debug, trace]
-  -v...                     Increase verbosity: -v = debug, -vv = trace (overrides --log-level)
+  -v...                     Raise verbosity to at least -v = debug, -vv = trace
       --no-log              Disable logging entirely (wins over --log-level and -v)
       --resume[=<JOB_ID>]   Resume an interrupted job: --resume (latest) or --resume=<JOB_ID>
       --resume-overlap <K>  Repeat the last K pen-down segments when resuming (for ink continuity)
@@ -323,7 +326,7 @@ The resolved values are logged at startup, so what is in force can be checked
 rather than remembered:
 
 ```bash
-grep "machine profile" plotly.log | tail -1
+grep "machine profile" "$(ls -t logs/*.log | head -1)"
 ```
 
 Built-in profiles: `idraw-a0` (841×1189), `idraw-a1` (864×594), `idraw-a2`
@@ -334,8 +337,8 @@ Built-in profiles: `idraw-a0` (841×1189), `idraw-a1` (864×594), `idraw-a2`
 
 | What | Where |
 |---|---|
-| Log file | `./plotly.log` (`--log-file`), level `info` by default; `-v` = debug, `-vv` = trace (raw wire traffic), `--no-log` = off |
-| Live log tail | bottom panel of the TUI (last 1000 lines) |
+| Log files | one per run: `./logs/<YYYY-MM-DD HH.MM.SS> <drawing>.log` (`--log-file` for another path). Level `trace` by default — every G-code line and every reply, microsecond timestamps, nothing dropped — so a big plot writes a few hundred MB; `--log-level info` for a small log, `--no-log` for none. The first lines record the version, the command line, the working directory and the drawing's full path, size and modification time. The path is printed when plotly exits. `logs/` is git-ignored. |
+| Live log tail | bottom panel of the TUI (last 1000 lines, `info` and up) |
 | Job directories | `~/.local/share/plotly/jobs/<job_id>/` |
 | Config | `~/.config/plotly/config.toml` |
 

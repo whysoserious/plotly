@@ -35,7 +35,10 @@ Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po na
 ## Build / test
 - `cargo build`, `cargo clippy`, `cargo fmt`, `cargo test`.
 - Bez sprzętu: `cargo run -- --simulate` (`MockTransport`).
-- Logi idą do **pliku** (`./plotly.log`), nie na stdout — TUI zajmuje terminal (DESIGN.org §5).
+- Logi idą do **pliku**, nie na stdout — TUI zajmuje terminal (DESIGN.org §5). Jeden plik na
+  uruchomienie: `./logs/<data godzina> <rysunek>.log` (git-ignorowane), domyślnie poziom
+  `trace` — cały ruch na drucie ze stemplem w µs. Stary `./plotly.log` to historia sprzed
+  2026-09-30.
 
 ## Commity
 - Po angielsku; jeden krok planu = jeden commit (patrz „Rytm pracy").

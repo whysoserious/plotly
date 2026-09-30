@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use tracing::level_filters::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::{ChronoLocal, FormatTime};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
@@ -22,8 +23,14 @@ use tracing_subscriber::Layer;
 
 use crate::cli::{Args, LogLevel};
 
-/// Local timestamp with millisecond precision and timezone offset (DESIGN.org §5).
-const TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
+/// Local timestamp with microsecond precision and timezone offset (DESIGN.org
+/// §5). Microseconds because the wire is read at that scale: the board answers
+/// a line in ~6 ms, and the gaps worth finding are fractions of that.
+const TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.6f%:z";
+
+/// The loudest level the in-TUI panel shows. The file takes everything; the
+/// panel is read live, and a wire line per G-code would scroll the rest away.
+const PANEL_LEVEL: LevelFilter = LevelFilter::INFO;
 
 /// Maximum number of formatted log lines retained for the in-TUI panel.
 const RING_CAPACITY: usize = 1000;
@@ -194,35 +201,112 @@ where
         .with(fmt_layer(writer))
 }
 
+/// What [`init`] set up: the appender's guard (keep it alive until exit so
+/// buffered lines flush), the ring the TUI reads, and where the file went.
+pub struct Logging {
+    pub guard: Option<WorkerGuard>,
+    pub ring: LogRing,
+    /// The log file of this run, or `None` when logging is off.
+    pub path: Option<PathBuf>,
+}
+
 /// Install logging (file + TUI ring layers) and the panic hook.
 ///
-/// Returns the appender's [`WorkerGuard`] (keep alive until exit so buffered
-/// lines flush) and the [`LogRing`] the TUI reads. When logging is disabled
-/// (`--no-log` or `--log-level off`) no subscriber is installed and the ring
-/// stays empty; the panic hook is installed regardless.
-pub fn init(args: &Args) -> (Option<WorkerGuard>, LogRing) {
+/// The file gets the resolved level — `trace` unless asked otherwise, which is
+/// every line on the wire — and the TUI panel at most [`PANEL_LEVEL`]. When
+/// logging is disabled (`--no-log` or `--log-level off`) no subscriber is
+/// installed and the ring stays empty; the panic hook is installed regardless.
+pub fn init(args: &Args) -> Logging {
     install_panic_hook();
 
     let ring = LogRing::new();
     let filter = level_filter(args.resolved_log_level());
     if filter == LevelFilter::OFF {
-        return (None, ring);
+        return Logging {
+            guard: None,
+            ring,
+            path: None,
+        };
     }
 
-    let (dir, file) = split_log_path(&args.log_file);
-    let appender = tracing_appender::rolling::never(dir, file);
-    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let path = args.log_path(chrono::Local::now());
+    let (dir, file) = split_log_path(&path);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "plotly: cannot create the log directory {}: {err}",
+            dir.display()
+        );
+    }
+    let appender = tracing_appender::rolling::never(&dir, file);
+    // Lossless: the default non-blocking writer drops lines once its buffer
+    // fills, and a log that silently skips part of a plot is the one thing a
+    // debugging log must not be. A full buffer now makes the logging thread
+    // wait for the disk instead — 128k lines of slack, never reached at the
+    // rate the wire runs.
+    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(false)
+        .finish(appender);
 
     tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer(writer))
-        .with(fmt_layer(ring.clone()))
+        .with(fmt_layer(writer).with_filter(ours_at(filter)))
+        .with(fmt_layer(ring.clone()).with_filter(ours_at(filter.min(PANEL_LEVEL))))
         .init();
+    log_header(args, &path);
+    Logging {
+        guard: Some(guard),
+        ring,
+        path: Some(path),
+    }
+}
+
+/// Plotly's own events at `level`, everyone else's at no more than `INFO`.
+///
+/// Trace is for our wire and our decisions; at that level the terminal
+/// library narrates its event loop, which is noise in a plot's log.
+fn ours_at(level: LevelFilter) -> Targets {
+    Targets::new()
+        .with_default(level.min(LevelFilter::INFO))
+        .with_target(env!("CARGO_CRATE_NAME"), level)
+}
+
+/// The first lines of every log: which program, run how, on what.
+///
+/// A log is read days later, often without the terminal that started it, so
+/// it says for itself what it is the log of.
+fn log_header(args: &Args, path: &Path) {
+    let argv: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|err| format!("<unknown: {err}>"));
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        log_file = %path.display(),
+        level = ?args.resolved_log_level(),
         "plotly logging initialized"
     );
-    (Some(guard), ring)
+    tracing::info!(argv = ?argv, %cwd, "command line");
+    if let Some(svg) = &args.svg_file {
+        let absolute = std::fs::canonicalize(svg).unwrap_or_else(|_| svg.clone());
+        match std::fs::metadata(svg) {
+            Ok(meta) => {
+                let modified = meta
+                    .modified()
+                    .map(|t| chrono::DateTime::<chrono::Local>::from(t).to_rfc3339())
+                    .unwrap_or_else(|_| "?".to_owned());
+                tracing::info!(
+                    file = %absolute.display(),
+                    bytes = meta.len(),
+                    %modified,
+                    "drawing"
+                );
+            }
+            Err(err) => tracing::warn!(file = %absolute.display(), %err, "drawing not readable"),
+        }
+    }
+    if let Some(text) = &args.text {
+        tracing::info!(%text, height_mm = args.text_height, "drawing: text");
+    }
 }
 
 /// Split a log path into `(directory, file_name)`, defaulting to the CWD.
@@ -285,6 +369,23 @@ mod tests {
     fn no_log_resolves_to_off_filter() {
         let args = Args::try_parse_from(["plotly", "--no-log", "--log-level", "trace"]).unwrap();
         assert_eq!(level_filter(args.resolved_log_level()), LevelFilter::OFF);
+    }
+
+    /// Trace means our wire, not a dependency narrating its event loop.
+    #[test]
+    fn trace_is_ours_alone() {
+        let ring = LogRing::new();
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt_layer(ring.clone()).with_filter(ours_at(LevelFilter::TRACE)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "plotly::transport", "-> \"G1 X1\"");
+            tracing::trace!(target: "mio::poll", "registering event source");
+            tracing::info!(target: "mio::poll", "something a dependency wants said");
+        });
+        let lines = ring.tail(10);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("G1 X1"), "{lines:?}");
+        assert!(lines[1].contains("wants said"), "{lines:?}");
     }
 
     #[test]

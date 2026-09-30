@@ -27,8 +27,18 @@ use ratatui::Terminal;
 pub fn run() -> io::Result<()> {
     let args = cli::Args::parse();
     // Keep the appender guard alive for the whole run so logs flush on exit.
-    let (_log_guard, log) = logging::init(&args);
+    let logging = logging::init(&args);
+    let result = run_with(&args, logging.ring.clone());
+    // The terminal is ours again, whether the TUI ran or startup failed: say
+    // where the record of this run is, while the name is on screen to copy.
+    if let Some(path) = &logging.path {
+        eprintln!("plotly: log in {}", path.display());
+    }
+    result
+}
 
+/// Everything after logging: load the drawing, greet the plotter, run the TUI.
+fn run_with(args: &cli::Args, log: logging::LogRing) -> io::Result<()> {
     if args.panic_test {
         panic!("synthetic panic to exercise the logging panic hook");
     }

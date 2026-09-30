@@ -651,9 +651,21 @@ i zdebugować błąd. Czyli logi muszą być: ze znacznikiem czasu (ms), z pozio
 | *TRACE* | pełna komunikacja z ploterem: każda wysłana linia G-code (~->~) i każda odpowiedź (~<-~ z ~ok~/~error~/status), bajty realtime. |
 
 ** Konfiguracja (CLI)
-- Domyślny plik: ~./plotly.log~ (append) — przewidywalna ścieżka, łatwa do wklejenia.
+- /Od 2026-09-30:/ *jeden plik na uruchomienie*, ~./logs/<YYYY-MM-DD HH.MM.SS> <rysunek>.log~
+  (~logs/~ w ~.gitignore~). Wcześniej był jeden ~./plotly.log~ (append) — przy wydrukach po
+  kilka godzin pytanie zawsze dotyczy jednego plotu, a nazwa z czasem i rysunkiem znajduje go
+  bez otwierania. Ścieżka jest wypisywana przy wyjściu.
 - ~--log-file <PATH>~ — własny plik.
-- ~--log-level <off|info|debug|trace>~ (domyślnie ~info~); skróty ~-v~ (debug), ~-vv~ (trace).
+- ~--log-level <off|info|debug|trace>~, *domyślnie ~trace~* (życzenie użytkownika: „bardzo
+  głośne logi, żeby potem nie było problemów z debugiem"). Log plotu nie da się podkręcić
+  po fakcie. ~-v~/~-vv~ tylko *podnoszą* poziom, nigdy nie obniżają.
+- Plik dostaje wszystko, *bez gubienia linii* (~NonBlockingBuilder::lossy(false)~ — domyślny
+  appender po cichu wyrzuca linie przy pełnym buforze). Panel TUI dostaje co najwyżej ~INFO~.
+  ~TRACE~/~DEBUG~ tylko z celów plotly; zależności (terminal) najwyżej ~INFO~.
+- Stempel czasu w *mikrosekundach*: płytka odpowiada w ~6 ms, a szukane przerwy są ułamkiem tego.
+- Nagłówek każdego logu: wersja, pid, poziom, linia poleceń, katalog roboczy, pełna ścieżka
+  rysunku z rozmiarem i datą modyfikacji.
+- Koszt: wydruk rzędu 600 tys. op to kilka milionów linii, *kilkaset MB* na plot.
 - ~--no-log~ — całkowicie wyłącz logowanie.
 - TUI zajmuje terminal → *logi idą do PLIKU*, nie na stdout. Dodatkowo *panel logów w TUI*
   (ring buffer, live tail) + skrót „copy log path".
@@ -1193,9 +1205,9 @@ plotly [OPTIONS] [SVG_FILE]
   --baud <N>               # domyślnie 115200 (firmware i tak fixed — rzadko potrzebne)
   --profile <NAME>         # profil maszyny (idraw-a4, idraw-a3, ...)
   --simulate               # użyj MockTransport (bez sprzętu)
-  --log-file <PATH>        # domyślnie ./plotly.log
-  --log-level <LEVEL>      # off|info|debug|trace (domyślnie info)
-  -v / -vv                 # debug / trace
+  --log-file <PATH>        # domyślnie ./logs/<data godzina> <rysunek>.log (jeden na uruchomienie)
+  --log-level <LEVEL>      # off|info|debug|trace (domyślnie trace)
+  -v / -vv                 # co najmniej debug / trace
   --no-log                 # wyłącz logowanie
   --resume [JOB_ID]        # wznów przerwany druk
   --resume-overlap <K>     # powtórz K ostatnich segmentów pen-down

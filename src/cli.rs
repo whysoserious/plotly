@@ -1,8 +1,18 @@
 //! Command-line interface (clap derive). See DESIGN.org §13.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Local};
 use clap::{Parser, ValueEnum};
+
+/// Where a run's log goes unless `--log-file` says otherwise: one file per run,
+/// relative to the working directory, kept out of git (`.gitignore`).
+pub const LOG_DIR: &str = "logs";
+
+/// Longest drawing name that goes into a log file's name, in characters. The
+/// generators put their whole parameter set in the SVG's name, and a file
+/// system caps a name at 255 bytes.
+const LOG_NAME_MAX: usize = 150;
 
 /// Plotly — TUI to drive an iDraw 2.0 pen plotter (DrawCore firmware).
 #[derive(Debug, Parser)]
@@ -37,15 +47,17 @@ pub struct Args {
     #[arg(long)]
     pub simulate: bool,
 
-    /// Log file path.
-    #[arg(long, value_name = "PATH", default_value = "./plotly.log")]
-    pub log_file: PathBuf,
+    /// Log file path. Default: a new file for every run in ./logs/, named after
+    /// the start time and the drawing.
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
 
-    /// Log level; overridden by -v/-vv and --no-log.
-    #[arg(long, value_enum, value_name = "LEVEL", default_value_t = LogLevel::Info)]
+    /// Log level for the file; overridden by -v/-vv and --no-log. The default
+    /// records every line on the wire, so a plot can be debugged afterwards.
+    #[arg(long, value_enum, value_name = "LEVEL", default_value_t = LogLevel::Trace)]
     pub log_level: LogLevel,
 
-    /// Increase verbosity: -v = debug, -vv = trace (overrides --log-level).
+    /// Raise verbosity to at least -v = debug, -vv = trace.
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -66,8 +78,9 @@ pub struct Args {
     pub panic_test: bool,
 }
 
-/// Effective logging verbosity. `Off` disables logging entirely.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// Effective logging verbosity. `Off` disables logging entirely. Ordered from
+/// quiet to loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum LogLevel {
     Off,
     Info,
@@ -78,16 +91,55 @@ pub enum LogLevel {
 impl Args {
     /// Resolve the effective log level.
     ///
-    /// Precedence: `--no-log` > `-v`/`-vv` > `--log-level` (> default `info`).
+    /// `--no-log` wins; otherwise `--log-level` (default `trace`), raised by
+    /// `-v`/`-vv` but never lowered by them.
     pub fn resolved_log_level(&self) -> LogLevel {
         if self.no_log {
             return LogLevel::Off;
         }
-        match self.verbose {
-            0 => self.log_level,
+        let floor = match self.verbose {
+            0 => LogLevel::Off,
             1 => LogLevel::Debug,
             _ => LogLevel::Trace,
+        };
+        self.log_level.max(floor)
+    }
+
+    /// The log file for a run started at `now`: `--log-file` if given, else
+    /// `logs/<date time> <drawing>.log`.
+    ///
+    /// One file per run rather than one file for ever: a plot is hours of wire
+    /// traffic, and the question afterwards is always about one plot. The name
+    /// sorts by time and says which drawing it was, so the log for "the
+    /// tesseract of Sunday" is found without opening anything.
+    pub fn log_path(&self, now: DateTime<Local>) -> PathBuf {
+        if let Some(path) = &self.log_file {
+            return path.clone();
         }
+        let stamp = now.format("%Y-%m-%d %H.%M.%S");
+        Path::new(LOG_DIR).join(format!("{stamp} {}.log", self.drawing_name()))
+    }
+
+    /// What this run draws, made safe for a file name.
+    fn drawing_name(&self) -> String {
+        let raw = match (&self.text, &self.svg_file) {
+            (Some(text), _) => format!("text {text}"),
+            (None, Some(path)) => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "drawing".to_owned()),
+            (None, None) => "no drawing".to_owned(),
+        };
+        let safe: String = raw
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .take(LOG_NAME_MAX)
+            .collect();
+        safe.trim().to_owned()
     }
 }
 
@@ -122,14 +174,25 @@ mod tests {
         }
     }
 
+    /// Loud by default: a plot that went wrong is debugged from its log, and
+    /// the log of a plot cannot be turned up afterwards.
     #[test]
-    fn default_log_level_is_info() {
-        assert_eq!(parse(&[]).resolved_log_level(), LogLevel::Info);
+    fn default_log_level_is_trace() {
+        assert_eq!(parse(&[]).resolved_log_level(), LogLevel::Trace);
     }
 
     #[test]
-    fn single_v_is_debug() {
-        assert_eq!(parse(&["-v"]).resolved_log_level(), LogLevel::Debug);
+    fn single_v_raises_a_quiet_level_to_debug() {
+        assert_eq!(
+            parse(&["--log-level", "info", "-v"]).resolved_log_level(),
+            LogLevel::Debug
+        );
+    }
+
+    /// `-v` asks for more, so under the trace default it must not mean less.
+    #[test]
+    fn v_never_lowers_the_level() {
+        assert_eq!(parse(&["-v"]).resolved_log_level(), LogLevel::Trace);
     }
 
     #[test]
@@ -171,13 +234,61 @@ mod tests {
         let a = parse(&[]);
         assert_eq!(a.baud, 115_200);
         assert_eq!(a.resume_overlap, 0);
-        assert_eq!(a.log_file, PathBuf::from("./plotly.log"));
+        assert_eq!(a.log_file, None);
         assert!(a.svg_file.is_none());
         assert!(a.port.is_none());
         assert!(a.profile.is_none());
         assert!(a.resume.is_none());
         assert!(!a.simulate);
         assert!(!a.no_log);
+    }
+
+    fn at_noon() -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local.with_ymd_and_hms(2026, 9, 28, 16, 55, 54).unwrap()
+    }
+
+    #[test]
+    fn each_run_logs_to_its_own_file_named_after_the_drawing() {
+        let args = parse(&["/home/me/blocks tesseract seed14397.svg"]);
+        assert_eq!(
+            args.log_path(at_noon()),
+            PathBuf::from("logs/2026-09-28 16.55.54 blocks tesseract seed14397.log")
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_drawing_still_gets_a_named_log() {
+        assert_eq!(
+            parse(&[]).log_path(at_noon()),
+            PathBuf::from("logs/2026-09-28 16.55.54 no drawing.log")
+        );
+    }
+
+    /// Text is typed by the user and may hold anything, a slash included.
+    #[test]
+    fn text_is_made_safe_for_a_file_name() {
+        let path = parse(&["--text", "a/b: c?"]).log_path(at_noon());
+        assert_eq!(
+            path,
+            PathBuf::from("logs/2026-09-28 16.55.54 text a_b_ c_.log")
+        );
+    }
+
+    #[test]
+    fn a_long_drawing_name_is_cut_to_fit_a_file_name() {
+        let long = format!("{}.svg", "x".repeat(400));
+        let path = parse(&[long.as_str()]).log_path(at_noon());
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.len() < 255, "{} bytes", name.len());
+    }
+
+    #[test]
+    fn an_explicit_log_file_wins() {
+        assert_eq!(
+            parse(&["--log-file", "/tmp/x.log", "a.svg"]).log_path(at_noon()),
+            PathBuf::from("/tmp/x.log")
+        );
     }
 
     #[test]
