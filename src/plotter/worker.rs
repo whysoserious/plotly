@@ -331,6 +331,28 @@ fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
     }
 }
 
+/// How long the host may take between one `ok` and the next line before the
+/// board's planner runs dry and the machine stops.
+///
+/// Waiting for `ok` is *not* part of this: that is the board setting the tempo,
+/// since Grbl withholds it while the planner is full. What starves the buffer is
+/// the gap after it — and a machine that stops with the pen on the paper leaves
+/// a dot, 298 ms of it being visible already (§2.7). The planner holds ~16
+/// blocks, which on 1 mm segments at `draw_feed` 2000 is roughly half a second
+/// of drawing, so 200 ms is worth knowing about and rare enough not to fill the
+/// log.
+const HOST_LAG_WARN: Duration = Duration::from_millis(200);
+
+/// What to blame for a host lag. The progress write is the one thing in that gap
+/// that touches the outside world; anything else means the thread simply was not
+/// running while the machine was waiting.
+fn blame_for(lag: Duration, disk: Duration) -> &'static str {
+    match disk.as_secs_f64() >= lag.as_secs_f64() / 2.0 {
+        true => "progress write",
+        false => "thread not scheduled",
+    }
+}
+
 /// Draw a whole plan op by op, checking for a stop between ops.
 ///
 /// Returns [`ControlFlow::Break`] when it consumed a `Shutdown` (or the channel
@@ -385,6 +407,9 @@ fn run_plan(
     // operator spends standing at a stopped machine — see the hold below.
     let mut paused_for = Duration::ZERO;
     let mut distance_mm = 0.0_f64;
+    // When the last op was acknowledged, and how long the progress write after
+    // it took — read at the next op to size the gap the board was left in.
+    let mut host_gap: Option<(Instant, Duration)> = None;
 
     for (index, op) in plan.ops.iter().enumerate().skip(start_index) {
         // A stop/pause only has to land on an op boundary (short ops keep it
@@ -466,6 +491,10 @@ fn run_plan(
             if let Some((deadline, _)) = cutoff.as_mut() {
                 *deadline += held;
             }
+            // A hold is not the host being slow: the pen is up and nothing is
+            // waiting on us. Without this the first op after a pause would
+            // report the whole pause as a stall.
+            host_gap = None;
         }
 
         // Either cutoff only has to fire by the next boundary once it is due.
@@ -509,6 +538,25 @@ fn run_plan(
             }
         }
 
+        // How long the board was left without work since the last `ok`, and
+        // what the host did with that time. A plot is hours of ops and one
+        // stall is enough to put a blob on the paper, so the machine has to say
+        // when it happened and where — hunting it afterwards on the sheet is
+        // how §2.9 lost three days.
+        if let Some((since_ok, disk)) = host_gap {
+            let lag = since_ok.elapsed();
+            if lag >= HOST_LAG_WARN {
+                tracing::warn!(
+                    done = index,
+                    pen_down = driver.pen() == Pen::Down,
+                    lag_ms = lag.as_millis(),
+                    disk_ms = disk.as_millis(),
+                    blame = blame_for(lag, disk),
+                    "the planner was left without work long enough for the machine to stop"
+                );
+            }
+        }
+
         let before = driver.position();
         if let Err(err) = apply(driver, op) {
             tracing::error!(%err, done = index, "plan op failed");
@@ -517,6 +565,8 @@ fn run_plan(
             checkpoint(progress, index, total, driver);
             return ControlFlow::Continue(None);
         }
+        // The board has the op and answered; from here the clock is ours.
+        let acknowledged = Instant::now();
         let after = driver.position();
         distance_mm += (after.x - before.x).hypot(after.y - before.y);
 
@@ -530,7 +580,9 @@ fn run_plan(
                 elapsed_secs: started.elapsed().saturating_sub(paused_for).as_secs_f64(),
             },
         );
+        let disk = Instant::now();
         checkpoint(progress, sent, total, driver);
+        host_gap = Some((acknowledged, disk.elapsed()));
     }
 
     // The last ops are only *queued* when the loop ends — `ok` means queued,
@@ -930,6 +982,25 @@ fn emit(events: &Sender<Event>, event: Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stall warning has to name the culprit, or it is just another line
+    /// saying something was slow: the progress write is the one thing in that
+    /// gap that touches the outside world.
+    #[test]
+    fn a_host_lag_is_blamed_on_the_disk_only_when_the_disk_took_it() {
+        let lag = Duration::from_millis(300);
+        assert_eq!(blame_for(lag, Duration::from_millis(280)), "progress write");
+        assert_eq!(blame_for(lag, Duration::from_millis(150)), "progress write");
+        assert_eq!(
+            blame_for(lag, Duration::from_millis(20)),
+            "thread not scheduled"
+        );
+        assert_eq!(
+            blame_for(lag, Duration::ZERO),
+            "thread not scheduled",
+            "a gap with no disk time in it is the thread, not the disk"
+        );
+    }
 
     #[test]
     fn a_disarmed_cutoff_never_fires() {
