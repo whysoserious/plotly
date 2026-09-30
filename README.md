@@ -219,7 +219,7 @@ STOP on the `S`). <kbd>?</kbd> shows this list in the app.
 | <kbd>]</kbd> / <kbd>PgDn</kbd> | pen down |
 | <kbd>.</kbd> / <kbd>,</kbd> | press the pen harder / lighter (Z by 0.05 mm) |
 | <kbd>space</kbd> | toggle the pen |
-| <kbd>h</kbd> | home the machine (`$H`) |
+| <kbd>h</kbd> | home the machine (lifts the pen first, then `$H`) |
 | <kbd>d</kbd> | release the motors (`$SLP`) — position unknown afterwards |
 | <kbd>Esc</kbd> / <kbd>r</kbd> | pause after the current shape / resume |
 | <kbd>S</kbd> | stop the plot, pen up |

@@ -206,6 +206,41 @@ fn resume_from_an_index_sends_only_the_remaining_ops_once() {
     assert_eq!(hits, 1, "last op drawn {hits} times, want exactly once");
 }
 
+/// A job picked up after a crash or a power cut is the case where the tracked
+/// pen state is most likely to be a lie: the last session may well have died
+/// with the nib on the paper. The preamble homes, and `$H` moves XY only — so
+/// the lift has to be sent before it, whatever the host believes.
+#[test]
+fn a_resume_lifts_the_pen_before_it_homes() {
+    let line = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+    let plan = Plan::build(&[line], &Placement::identity(), &PlanSettings::default());
+    let start = plan.ops.len() / 2;
+
+    let (mut worker, sent) = worker_on_mock();
+    worker.send(Command::RunPlan {
+        plan,
+        progress: None,
+        start: Start::Resume { index: start },
+    });
+    while let Some(event) = worker.recv_timeout(TIMEOUT) {
+        if matches!(event, Event::PlanDone { .. } | Event::Aborted(_)) {
+            break;
+        }
+    }
+    worker.shutdown();
+
+    let sent = sent.lock().unwrap();
+    let lift = sent
+        .iter()
+        .position(|l| l.contains("Z0.500"))
+        .expect("the resume sent no pen-up");
+    let home = sent.iter().position(|l| l == "$H").expect("no homing");
+    assert!(
+        lift < home,
+        "homed with the pen possibly still down: {sent:?}"
+    );
+}
+
 /// Carrying on inside the session that stopped the plot must not home: the head
 /// is already where the plan left it, and `$H` would drive it to the far corner
 /// for ~25 s, then travel back — and on the way it would drag the pen across the

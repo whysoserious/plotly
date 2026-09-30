@@ -351,6 +351,25 @@ impl Driver {
         self.set_pen(Pen::Down)
     }
 
+    /// Lift the pen whether or not the tracked state already says it is up.
+    ///
+    /// Everywhere else trusts that state, and should: a Z block per stroke that
+    /// changes nothing is a block the planner did not need. But the state is a
+    /// *belief*. The firmware cannot be asked — `$QP` answers `1` whatever the
+    /// Z axis is doing (§15.3) — so it starts at "up" on connect because that
+    /// is the safe assumption, and a session that ended with the pen on the
+    /// paper (a crash, a power cut, a kill) leaves the next one believing a
+    /// lie. Before motion that would otherwise drag the nib across the sheet —
+    /// homing, a resume preamble, a stop, the operator's own pen-up key —
+    /// saying it costs one block, and assuming it costs a line across the
+    /// drawing.
+    pub fn force_pen_up(&mut self) -> Result<(), DriverError> {
+        if self.pen == Pen::Up {
+            tracing::debug!("lifting the pen without trusting the tracked state");
+        }
+        self.move_pen(Pen::Up)
+    }
+
     /// Flip the pen. Done with an explicit Z move rather than the firmware's
     /// `$TP`: `$TP` toggles relative to a state we cannot read back, so it
     /// would drift out of sync with ours after any missed command.
@@ -386,6 +405,13 @@ impl Driver {
     /// at 0, i.e. above the pen-up height, so the pen counts as up.
     pub fn home(&mut self) -> Result<(), DriverError> {
         tracing::info!("homing");
+        // `$H` moves XY only, so a pen that is — or might be — on the paper
+        // gets dragged the length of the sheet to the home corner. Best-effort:
+        // if the lift is refused, homing is still what the operator asked for,
+        // and it is also what clears the alarm that would have refused it.
+        if let Err(err) = self.force_pen_up() {
+            tracing::warn!(%err, "could not lift the pen before homing; homing anyway");
+        }
         self.command_within("$H", HOMING_TIMEOUT)?;
         self.pen = Pen::Up;
         self.pos = Point::new(0.0, 0.0);
@@ -593,6 +619,11 @@ impl Driver {
             tracing::debug!(pen = %target, "pen already there");
             return Ok(());
         }
+        self.move_pen(target)
+    }
+
+    /// The Z move itself, with no belief consulted — see [`Driver::set_pen`].
+    fn move_pen(&mut self, target: Pen) -> Result<(), DriverError> {
         let settle = match target {
             Pen::Up => self.settings.settle_up_secs,
             Pen::Down => self.settings.settle_down_secs,
@@ -773,6 +804,57 @@ mod tests {
             version: "DrawCore V2.10".to_owned(),
             port: "mock".to_owned(),
         })
+    }
+
+    /// The tracked pen state is a belief the firmware cannot confirm (§15.3),
+    /// and `force_pen_up` is what stops that belief steering the machine: a
+    /// session that starts with the nib on the paper believes it is up, and
+    /// every ordinary `pen_up` then sends nothing at all.
+    #[test]
+    fn a_forced_lift_sends_the_z_move_the_ordinary_one_skips() {
+        let mock = MockTransport::new();
+        let sent = mock.sent_handle();
+        let mut d = driver_on(mock);
+
+        // The driver starts out believing the pen is up, so this sends nothing.
+        d.pen_up().unwrap();
+        assert!(
+            !sent.lock().unwrap().iter().any(|l| l.contains("Z0.500")),
+            "the belief was not being trusted, so this test proves nothing"
+        );
+
+        d.force_pen_up().unwrap();
+        assert_eq!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains("Z0.500"))
+                .count(),
+            1,
+            "a forced lift sent no Z move"
+        );
+    }
+
+    /// `$H` moves XY only. A pen left on the paper is dragged the length of the
+    /// sheet to the home corner, so the lift has to go out *first* — and it
+    /// cannot wait on a belief that says the pen is already up.
+    #[test]
+    fn homing_lifts_the_pen_before_it_moves() {
+        let mock = MockTransport::new();
+        let sent = mock.sent_handle();
+        let mut d = driver_on(mock);
+
+        d.home().unwrap();
+
+        let sent = sent.lock().unwrap();
+        let lift = sent.iter().position(|l| l.contains("Z0.500"));
+        let home = sent.iter().position(|l| l == "$H");
+        assert!(lift.is_some(), "homing sent no pen-up: {sent:?}");
+        assert!(home.is_some(), "homing sent no $H: {sent:?}");
+        assert!(
+            lift < home,
+            "the pen was lifted after the homing move: {sent:?}"
+        );
     }
 
     #[test]

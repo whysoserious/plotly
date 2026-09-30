@@ -287,7 +287,10 @@ fn run(mut driver: Driver, commands: &Receiver<Command>, events: &Sender<Event>)
 fn run_one(driver: &mut Driver, command: Command, events: &Sender<Event>) {
     let (label, result): (&str, Result<(), DriverError>) = match command {
         Command::SetPenDownZ(z) => ("pen depth", driver.set_pen_down_z(z)),
-        Command::PenUp => ("pen up", driver.pen_up()),
+        // The operator's own reflex when the nib is on the paper. A no-op
+        // because the app believes it is already up is the one answer that
+        // must not happen here.
+        Command::PenUp => ("pen up", driver.force_pen_up()),
         Command::PenDown => ("pen down", driver.pen_down()),
         Command::PenToggle => ("pen", driver.toggle_pen()),
         Command::Home => {
@@ -680,7 +683,10 @@ fn resume_to(
             false => format!("carrying on from op {start_index}"),
         }),
     );
-    driver.pen_up()?;
+    // Forced, not assumed: this is the one place where a wrong belief about the
+    // pen writes a line across the whole drawing (the travel below, and the
+    // homing above it).
+    driver.force_pen_up()?;
     driver.set_feed(RESUME_TRAVEL_FEED)?;
     driver.move_to(state.pos)?; // travel to the stop point, pen up
     if state.pen_down {
@@ -880,7 +886,9 @@ fn cutoff_fired(cutoff: Option<(Instant, bool)>, now: Instant) -> Option<bool> {
 /// Stop the plan, lifting the pen only if asked, and report it with the reason.
 fn stop_plan(driver: &mut Driver, events: &Sender<Event>, pen_up: bool, cause: StopCause) {
     if pen_up {
-        if let Err(err) = driver.pen_up() {
+        // "Get the pen off the paper" is the whole point of a stop, so it is
+        // said rather than assumed — see [`Driver::force_pen_up`].
+        if let Err(err) = driver.force_pen_up() {
             tracing::warn!(%err, "pen up during stop failed");
         }
     }

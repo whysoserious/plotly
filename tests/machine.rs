@@ -19,8 +19,14 @@ fn driver_with_log() -> (Driver, std::sync::Arc<std::sync::Mutex<Vec<String>>>) 
     (driver, sent)
 }
 
+/// `h` homes, and gets the pen out of the way first.
+///
+/// `$H` drives XY to the far corner and does not touch Z, so a nib left on the
+/// paper would be dragged the length of the sheet. The lift goes out whatever
+/// the tracked pen state says — that state is a belief the firmware cannot
+/// confirm (§15.3), and after a crash it is exactly the belief that is wrong.
 #[test]
-fn h_is_bound_to_homing_and_sends_exactly_that() {
+fn h_is_bound_to_homing_and_clears_the_paper_first() {
     assert_eq!(
         action_for(
             Mode::Navigation,
@@ -32,7 +38,16 @@ fn h_is_bound_to_homing_and_sends_exactly_that() {
     let (mut driver, sent) = driver_with_log();
     driver.home().expect("the mock answers ok");
 
-    assert_eq!(*sent.lock().unwrap(), vec!["$H".to_owned()]);
+    // The pen-up Z, the feed restore that Grbl's modal `F` needs after it
+    // (§2.2), and then the homing move — in that order and nothing else.
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![
+            "G1 G90 Z0.500 F5000".to_owned(),
+            "G1 F2000".to_owned(),
+            "$H".to_owned(),
+        ]
+    );
 }
 
 #[test]

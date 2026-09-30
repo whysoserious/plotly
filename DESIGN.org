@@ -732,6 +732,25 @@ wznowieniem nie ma znaczenia.
 ~resuming: travelling to op N~ (przejazd przez arkusz). Pod jedną etykietą „resuming" była to
 minuta ekranu, który nic nie mówi — a to dokładnie ten rodzaj ciszy, który każe wcisnąć Ctrl-C.
 
+*Stan pióra to /przekonanie/, a nie odczyt — i nie wolno nim sterować ruchem (2026-09-29).*
+Firmware nie umie powiedzieć, gdzie jest pióro (~$QP~ stale ~1~, §15.3), więc host trzyma
+własny stan — a ~set_pen~ świadomie *nic nie wysyła*, gdy stan już się zgadza (blok Z na
+kształt, który niczego nie zmienia, to blok, którego planner nie potrzebował). Problem w tym,
+że to przekonanie bywa fałszywe:
+- ~Driver::new~ startuje z ~Pen::Up~, bo „nie da się zapytać", więc po sesji zakończonej
+  z piórem na papierze (crash, zanik prądu, ~kill~) nowa sesja *wierzy w kłamstwo* — a wtedy
+  pierwsze ~pen_up()~ nie wysyła nic, bo „już jest w górze";
+- ~$H~ rusza tylko XY, Z zostawia gdzie jest. Preambuła wznawiania robiła ~pen_up()~ (no-op) →
+  ~$H~ → *pióro przeciągnięte przez cały arkusz do rogu bazowania*, potem dojazd do punktu
+  wznowienia — też po papierze. To ten sam kształt objawu, który użytkownik widuje na dużych
+  plotach: kleks plus cienka kreska przez rysunek (2026-09-29).
+Stąd ~Driver::force_pen_up~ — ruch Z bez pytania o stan — użyty tam, gdzie fałszywe przekonanie
+kosztuje kreskę przez rysunek: ~home()~ (przed ~$H~, best-effort: gdy podniesienie odmówi,
+homing i tak jest tym, o co poprosił operator, i to on czyści alarm), preambuła ~resume_to~,
+~stop_plan~ („zabierz pióro z papieru" to cały sens stopu) i klawisz ~[~ (odruch operatora,
+gdy widzi nib na papierze — no-op jest tu jedyną niedopuszczalną odpowiedzią). Ścieżka planu
+zostaje na przekonaniu: tam idą tysiące ruchów i stan jest świeży.
+
 *Trzy sposoby, w jakie plan może się zacząć — ~Start~ (2026-09-27).* ~Command::RunPlan~ bierze
 ~Start::Fresh~ / ~Start::Carry{index}~ / ~Start::Resume{index}~ zamiast gołego ~start_index~,
 bo różnią się *nie* indeksem, a tym, co wiadomo o karetce:
