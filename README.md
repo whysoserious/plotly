@@ -405,7 +405,9 @@ is how the pen fence came to be `"off"` by default (§2.5). The same binary
 carries the print probes that found the clean-feed boundary: `--ladder` (one
 stroke at F300..F12000), `--zladder` (six pen-down heights), `--rampladder`
 (six lead-in lengths), `--dip` and `--pen` (axis sampling through a real
-pen-down / draw / pen-up). Every move is relative and comes straight back, so
+pen-down / draw / pen-up), and `--zcycle` (hundreds of hatch strokes with a pen
+cycle each, rows alternating the Z feed or, with `--stall-ms`, a forced idle:
+does the pen axis lose its depth?). Every move is relative and comes straight back, so
 nothing depends on having homed.
 
 ## 9. Repository layout

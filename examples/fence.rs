@@ -96,6 +96,22 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    if opts.zcycle {
+        stage_zcycle(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
+    if opts.shortladder {
+        stage_shortladder(&mut probe, &opts);
+        if confirm("\nDisable the motors now (`$SLP`)?") {
+            probe.send_ok("$SLP", SHORT_WAIT);
+        }
+        return Ok(());
+    }
+
     if opts.zladder {
         stage_zladder(&mut probe, &opts);
         if confirm("\nDisable the motors now (`$SLP`)?") {
@@ -578,6 +594,290 @@ fn stage_zladder(probe: &mut Probe, opts: &Options) {
     println!("\n  Six rows, heaviest at the top.");
 }
 
+/// Lengths the short-stroke ladder walks, mm. Coarse at the top, fine where the
+/// answer is expected: a drawing's hatch is full of strokes between 2 mm and a
+/// tenth of one.
+const SHORT_LADDER_MM: [f64; 12] = [20.0, 10.0, 5.0, 3.0, 2.0, 1.5, 1.0, 0.7, 0.5, 0.3, 0.2, 0.1];
+
+/// How many strokes each row of the short ladder repeats.
+const SHORT_LADDER_REPEATS: usize = 5;
+
+/// Gap between the strokes of a row and between rows, mm.
+const SHORT_LADDER_GAP: f64 = 5.0;
+
+/// Draw strokes of decreasing length, each the way a plot draws one: land,
+/// move, lift. Finds the length below which a stroke leaves nothing.
+///
+/// The ladder the other three do not cover. `--ladder` walks the feed,
+/// `--zladder` the pressure, `--rampladder` the lead-in — all of them on a
+/// stroke long enough to be seen. But a drawing is not made of those: the
+/// tesseract plot of 2026-09-28 has 3542 strokes under 2 mm and 1345 under one,
+/// 12.7% of the sheet, and a nib that needs a millimetre to start would leave
+/// every one of them off the paper. That is not a fault anything reports — the
+/// plan is sent in full and the machine answers `ok` to all of it.
+///
+/// Run it at the *plot's* feed (`--feed 2000`), not the probe's slow default:
+/// the question is what a landing does at the speed the drawing runs.
+fn stage_shortladder(probe: &mut Probe, opts: &Options) {
+    let mut lengths: Vec<f64> = SHORT_LADDER_MM.to_vec();
+    if opts.reverse {
+        lengths.reverse();
+    }
+    println!("\n---- how short can a stroke be and still leave a mark? ----");
+    println!(
+        "{} rows of {SHORT_LADDER_REPEATS} strokes, {SHORT_LADDER_GAP} mm apart, top to bottom:",
+        lengths.len()
+    );
+    for (i, mm) in lengths.iter().enumerate() {
+        println!("  row {:>2}  {mm} mm", i + 1);
+    }
+    println!(
+        "\nEach stroke is a whole landing: pen down, move, pen up — the same three\n         blocks a plot sends per shape, at F{} and Z{:.1}. Read it for the first row\n         whose strokes are missing or too faint to count: that length is the floor,\n         and every shorter stroke in a drawing is ink the plot never left.\n         Run it again with --reverse: if the floor keeps its *length* it is real,\n         if it keeps its *position* it was the pen drying out, not the length.",
+        opts.feed, opts.pen_down_z
+    );
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    probe.send_ok(
+        &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+        SHORT_WAIT,
+    );
+    for (i, mm) in lengths.iter().enumerate() {
+        if i > 0 {
+            probe.send_ok(
+                &format!("G1 G91 Y-{SHORT_LADDER_GAP} F{}", opts.travel_feed()),
+                SHORT_WAIT,
+            );
+            probe.wait_idle(LONG_WAIT);
+        }
+        let mut row_mm = 0.0;
+        for k in 0..SHORT_LADDER_REPEATS {
+            if k > 0 {
+                probe.send_ok(
+                    &format!("G1 G91 X{SHORT_LADDER_GAP} F{}", opts.travel_feed()),
+                    SHORT_WAIT,
+                );
+                row_mm += SHORT_LADDER_GAP;
+            }
+            // Land, draw, lift — queued back to back, no dwell between them,
+            // exactly as `pen_fence = "off"` sends them during a plot.
+            probe.send_ok(
+                &format!("G1 G90 Z{:.3} F{}", opts.pen_down_z, opts.z_feed),
+                SHORT_WAIT,
+            );
+            probe.send_ok(&format!("G1 G91 X{mm} F{}", opts.feed), SHORT_WAIT);
+            probe.send_ok(
+                &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, opts.z_feed),
+                SHORT_WAIT,
+            );
+            row_mm += mm;
+        }
+        probe.wait_idle(LONG_WAIT);
+        // Back to the left edge, pen up, ready for the next row.
+        probe.send_ok(
+            &format!("G1 G91 X-{row_mm:.3} F{}", opts.travel_feed()),
+            SHORT_WAIT,
+        );
+        probe.wait_idle(LONG_WAIT);
+        println!("  row {:>2} drawn at {mm} mm", i + 1);
+    }
+    println!("\n  {} rows, longest at the top.", lengths.len());
+}
+
+/// Strokes in one row of the pen-cycle probe.
+const ZCYCLE_LINES: usize = 50;
+/// Length of each of those strokes, mm — a typical hatch line of the plot.
+const ZCYCLE_LEN: f64 = 8.0;
+/// Pitch between strokes, mm: the hatch spacing of the plot.
+const ZCYCLE_PITCH: f64 = 1.0;
+/// Blank gap between rows, mm.
+const ZCYCLE_ROW_GAP: f64 = 4.0;
+
+/// How often a stalled row of the pen-cycle probe stops: after every this many
+/// strokes.
+const ZCYCLE_STALL_EVERY: usize = 5;
+
+/// Draw hundreds of short hatch strokes, each with its own pen cycle, streamed
+/// the way a plot streams them — rows alternating one variable.
+///
+/// The question the tesseract plot of 2026-09-28 left: strokes missing on all
+/// three sessions' parts of the sheet, whole strokes rather than faint ones,
+/// in runs of a few neighbours, with the pressure correct when checked. The
+/// host is cleared (every op acknowledged) and so are the long idles (all
+/// three sessions have them). What remains is the pen axis: 55 000 Z moves a
+/// plot, open loop, never re-homed, where one lost full step is 0.19 mm
+/// (`$102 = 85.8`) — about the whole band between "draws" and "does not
+/// touch".
+///
+/// Two variables, one per run:
+///   * the Z feed (default): rows alternate `--z-feed` and `--z-feed-b`. Does
+///     the axis lose steps at speed? Measured 2026-09-30: 800 cycles at F5000
+///     and F1000, every stroke drawn — it does not.
+///   * a stall (`--stall-ms`): even rows stop every few strokes until the
+///     machine is idle and then hold it there. The board ships `$1 = 254`,
+///     and stock Grbl answers an emptied planner by holding still that long
+///     and then *cutting the stepper current*, Z included; the rotor may come
+///     back a full step off. A plot never idles on purpose, so this only
+///     happens when the host falls behind — rarely, which is why only the
+///     longest plots would show it.
+///
+/// Rows alternate so that a difference between them cannot be the pen drying
+/// out over time (§2.9: vary one thing, on one sheet, interleaved). Nothing
+/// else waits for `Idle` inside a row: every line goes out as soon as the
+/// previous one is acknowledged, so the planner stays as full as in a plot.
+fn stage_zcycle(probe: &mut Probe, opts: &Options) {
+    let stall = (opts.stall_ms > 0).then(|| Duration::from_millis(u64::from(opts.stall_ms)));
+    let feeds = match (stall, opts.reverse) {
+        (Some(_), _) => [opts.z_feed, opts.z_feed],
+        (None, false) => [opts.z_feed, opts.z_feed_b],
+        (None, true) => [opts.z_feed_b, opts.z_feed],
+    };
+    // Which rows stall: the even ones, or the odd ones under --reverse.
+    let stalls_in = |row: usize| stall.is_some() && (row % 2 == 1) != opts.reverse;
+    let rows = opts.rows as usize;
+    let row_pitch = ZCYCLE_LEN + ZCYCLE_ROW_GAP;
+    println!("\n---- does the pen axis lose its depth? ----");
+    println!(
+        "{rows} rows of {ZCYCLE_LINES} strokes, {ZCYCLE_LEN} mm long and {ZCYCLE_PITCH} mm apart: \
+         {} pen cycles in all.",
+        rows * ZCYCLE_LINES
+    );
+    println!(
+        "Needs {:.0} x {:.0} mm of paper to the right of and below the pen.",
+        (ZCYCLE_LINES - 1) as f64 * ZCYCLE_PITCH,
+        rows as f64 * row_pitch - ZCYCLE_ROW_GAP
+    );
+    match stall {
+        Some(held) => {
+            let (quiet, stalled) = if opts.reverse {
+                ("even", "odd")
+            } else {
+                ("odd", "even")
+            };
+            println!("Rows alternate, top row first:");
+            println!("  {quiet:<4} rows  streamed straight through, as a plot runs");
+            println!(
+                "  {stalled:<4} rows  stop after every {ZCYCLE_STALL_EVERY}th stroke with the pen {}, \
+                 wait for Idle, hold {} ms",
+                if opts.stall_down { "DOWN on the paper" } else { "up" },
+                held.as_millis()
+            );
+        }
+        None => {
+            println!("Rows alternate the Z feed, top row first:");
+            println!(
+                "  odd rows  (1, 3, 5, ...)  Z feed F{}\n  even rows (2, 4, 6, ...)  Z feed F{}",
+                feeds[0], feeds[1]
+            );
+        }
+    }
+    println!(
+        "Strokes at F{}, travel at F{}, Z{:.2} down / Z{:.2} up.",
+        opts.feed,
+        opts.travel_feed(),
+        opts.pen_down_z,
+        opts.pen_up_z
+    );
+    if stall.is_some() {
+        println!(
+            "\nCount the missing or faint strokes in each row, and note whether they\n\
+             start right after a stall (every {ZCYCLE_STALL_EVERY}th stroke). Missing only in the\n\
+             stalled rows: an idle machine loses the pen's depth — `$1 = 255` keeps the\n\
+             motors powered and is the fix to try. Listen during a stall as well: the\n\
+             steppers' hum stopping is the current being cut."
+        );
+    } else {
+        println!(
+            "\nCount the missing or broken strokes in each row. Missing only in the fast\n\
+             rows: the axis loses steps at that speed. Missing in both alike: Z speed is\n\
+             not it. None anywhere: the fault needs a longer run (--rows 64) or a warm\n\
+             machine, and that is an answer too. Where in a row they go missing says\n\
+             whether a lost depth comes back by itself."
+        );
+    }
+    if !confirm("Run it? (put paper under the pen)") {
+        return;
+    }
+
+    probe.send_ok(
+        &format!("G1 G90 Z{:.3} F{}", opts.pen_up_z, feeds[0]),
+        SHORT_WAIT,
+    );
+    let started = Instant::now();
+    let mut stalls = 0;
+    for row in 0..rows {
+        let z_feed = feeds[row % 2];
+        if row > 0 {
+            probe.send_streamed(&format!(
+                "G1 G91 X-{:.3} Y-{row_pitch:.3} F{}",
+                (ZCYCLE_LINES - 1) as f64 * ZCYCLE_PITCH,
+                opts.travel_feed()
+            ));
+        }
+        for k in 0..ZCYCLE_LINES {
+            let stall_here = stalls_in(row) && k % ZCYCLE_STALL_EVERY == ZCYCLE_STALL_EVERY - 1;
+            if k > 0 {
+                probe.send_streamed(&format!(
+                    "G1 G91 X{ZCYCLE_PITCH:.3} F{}",
+                    opts.travel_feed()
+                ));
+            }
+            // Land, draw, lift — the plot's own sequence under
+            // `pen_fence = "off"`: the Z move, the feed restore, the stroke.
+            probe.send_streamed(&format!("G1 G90 Z{:.3} F{z_feed}", opts.pen_down_z));
+            if stall_here && opts.stall_down {
+                hold_idle(probe, stall);
+                stalls += 1;
+            }
+            probe.send_streamed(&format!("G1 F{}", opts.feed));
+            // Serpentine, like a hatch: down, then up, so every row ends at
+            // its top edge and the travel between strokes stays one pitch.
+            let dy = if k % 2 == 0 { -ZCYCLE_LEN } else { ZCYCLE_LEN };
+            probe.send_streamed(&format!("G1 G91 Y{dy:.3}"));
+            probe.send_streamed(&format!("G1 G90 Z{:.3} F{z_feed}", opts.pen_up_z));
+            if stall_here && !opts.stall_down {
+                hold_idle(probe, stall);
+                stalls += 1;
+            }
+        }
+        println!(
+            "  row {:>2} sent (Z feed F{z_feed}{}), {:.0} s in",
+            row + 1,
+            if stalls_in(row) { ", stalled" } else { "" },
+            started.elapsed().as_secs_f64()
+        );
+    }
+    probe.wait_idle(LONG_WAIT);
+    // Leave the head at the top-left stroke, where the probe began.
+    probe.send_ok(
+        &format!(
+            "G1 G91 X-{:.3} Y{:.3} F{}",
+            (ZCYCLE_LINES - 1) as f64 * ZCYCLE_PITCH,
+            (rows - 1) as f64 * row_pitch,
+            opts.travel_feed()
+        ),
+        SHORT_WAIT,
+    );
+    probe.wait_idle(LONG_WAIT);
+    println!(
+        "\n  {} pen cycles and {stalls} stalls in {:.0} s. Row 1 is at the top.",
+        rows * ZCYCLE_LINES,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// Let the planner run dry and keep the machine standing: what a plot's host
+/// does when it falls behind, made to happen on purpose.
+///
+/// Waiting for `Idle` first is the point — a sleep alone would only stop
+/// feeding a planner that still holds seconds of work.
+fn hold_idle(probe: &mut Probe, held: Option<Duration>) {
+    let Some(held) = held else { return };
+    probe.wait_idle(LONG_WAIT);
+    std::thread::sleep(held);
+}
+
 /// Which barrier is under test.
 #[derive(Clone, Copy)]
 enum Barrier {
@@ -657,6 +957,39 @@ impl Probe {
                 Ok(Some(r)) if r == "ok" || r.starts_with("error:") => return,
                 Ok(Some(_)) => {}
                 _ => return,
+            }
+        }
+    }
+
+    /// Send a line the way a plot streams it: quietly, but waiting as long as
+    /// a full planner holds its `ok` back, and saying so when the board
+    /// refuses or never answers — a probe that loses count of its `ok`s is
+    /// no longer sending what it claims.
+    fn send_streamed(&mut self, line: &str) {
+        if let Err(err) = self.transport.send_line(line) {
+            println!("  !! send failed on {line:?}: {err}");
+            return;
+        }
+        let deadline = Instant::now() + LONG_WAIT;
+        loop {
+            match self
+                .transport
+                .read_line_for(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(Some(r)) if r == "ok" => return,
+                Ok(Some(r)) if r.starts_with("error:") || r.starts_with("ALARM") => {
+                    println!("  !! {line:?} refused: {r}");
+                    return;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    println!("  !! no ok for {line:?}");
+                    return;
+                }
+                Err(err) => {
+                    println!("  !! read failed on {line:?}: {err}");
+                    return;
+                }
             }
         }
     }
@@ -805,8 +1138,20 @@ struct Options {
     ladder: bool,
     /// Run the pen-pressure-ladder stage.
     zladder: bool,
+    /// Run the short-stroke-length ladder.
+    shortladder: bool,
     /// Run the lead-in-length ladder.
     rampladder: bool,
+    /// Run the many-pen-cycles probe.
+    zcycle: bool,
+    /// Rows of the pen-cycle probe.
+    rows: u32,
+    /// The pen-cycle probe's second Z feed, for the even rows.
+    z_feed_b: u32,
+    /// Make the pen-cycle probe's even rows stall this long at idle, ms.
+    stall_ms: u32,
+    /// Stall with the pen on the paper instead of in the air.
+    stall_down: bool,
     /// Feed for a ramp's slow stretches, mm/min. Defaults to a third of `feed`.
     ramp_feed: Option<u32>,
     /// Step between rows of the pressure ladder, mm.
@@ -852,7 +1197,13 @@ impl Options {
             dip: false,
             ladder: false,
             zladder: false,
+            shortladder: false,
             rampladder: false,
+            zcycle: false,
+            rows: 16,
+            z_feed_b: 1000,
+            stall_ms: 0,
+            stall_down: false,
             ramp_feed: None,
             z_step: 0.2,
             travel_feed: None,
@@ -882,7 +1233,13 @@ impl Options {
                 "--dip" => opts.dip = true,
                 "--ladder" => opts.ladder = true,
                 "--zladder" => opts.zladder = true,
+                "--shortladder" => opts.shortladder = true,
                 "--rampladder" => opts.rampladder = true,
+                "--zcycle" => opts.zcycle = true,
+                "--rows" => opts.rows = number(args.next(), "--rows")?,
+                "--z-feed-b" => opts.z_feed_b = number(args.next(), "--z-feed-b")?,
+                "--stall-ms" => opts.stall_ms = number(args.next(), "--stall-ms")?,
+                "--stall-down" => opts.stall_down = true,
                 "--ramp-feed" => opts.ramp_feed = Some(number(args.next(), "--ramp-feed")?),
                 "--reverse" => opts.reverse = true,
                 "--travel-feed" => opts.travel_feed = Some(number(args.next(), "--travel-feed")?),
@@ -898,6 +1255,9 @@ impl Options {
                 "--feed" => opts.feed = number(args.next(), "--feed")?,
                 other => return Err(format!("unknown argument {other:?}")),
             }
+        }
+        if opts.zcycle && (opts.rows == 0 || opts.z_feed_b == 0) {
+            return Err("--rows and --z-feed-b must be above zero".to_owned());
         }
         if opts.mm == 0 || opts.feed == 0 {
             return Err("--mm and --feed must be above zero".to_owned());
@@ -922,7 +1282,13 @@ fn print_usage() {
          --baud <n>      baud rate (default: {DEFAULT_BAUD})\n  \
          --ladder        draw the same stroke at F300..F12000, one sheet\n  \
          --zladder       draw it at six pen-down heights, one sheet\n  \
+         --shortladder   draw landings of 20..0.1 mm: how short still marks?\n  \
          --rampladder    draw a cornered stroke at six lead-in lengths, one sheet\n  \
+         --zcycle        hundreds of hatch strokes, one pen cycle each: does Z lose depth?\n  \
+         --rows <n>      rows of 50 strokes for --zcycle (default: 16)\n  \
+         --z-feed-b <n>  --zcycle's Z feed on even rows (default: 1000)\n  \
+         --stall-ms <n>  --zcycle: even rows stop at idle this long every 5 strokes\n  \
+         --stall-down    ...with the pen on the paper rather than in the air\n  \
          --ramp-feed <n>  feed for a ramp's slow stretches (default: half --feed)\n  \
          --z-step <n>    step between those heights, thousandths of a mm (default: 200)\n  \
          --reverse       draw a ladder's rows in the opposite order\n  \
