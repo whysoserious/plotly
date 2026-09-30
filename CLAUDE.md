@@ -32,6 +32,19 @@ Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po na
   - Pełna mapa protokołu, ryzyka i konsekwencje (transform osi, bounds = host): DESIGN.org §2.
 - **AxiDraw Control = TYLKO inspiracja ficzerów**, nie cel sprzętowy ani protokół (EBB/plotink nas nie dotyczy).
 
+## Dokumentacja i sąsiedni projekt
+- `README.md` — jak to zbudować i uruchomić: zależności systemowe, `cargo build`,
+  `--simulate`, kolejność startu, co robi z SVG, klawiszologia, config, testy,
+  sondy sprzętowe. Po angielsku, pisane dla kogoś, kto klonuje repo. **Zmieniając
+  CLI, klawisze, config, profile albo układ repo — zaktualizuj README.**
+- `DESIGN.org` — źródło prawdy o *dlaczego* (protokół, pomiary, plan §14, otwarte
+  pytania §15.3). `default.conf` — pokrętła configu z komentarzem i kosztem w czasie.
+- SVG-i do rysowania powstają w `../penplotter-generators/` (szkice p5.js →
+  `vpype-process.sh` → `output.svg`). To tam jest reorder i hatch-fill (vpype),
+  dlatego plotly rysuje ścieżki *w kolejności z pliku* (§14 krok 5.2). Tamto repo
+  ma własny `CLAUDE.md` i **inne zasady commitowania** (wolno commitować i pushować
+  bez pytania). Mapa obu projektów: `../CLAUDE.md`.
+
 ## Build / test
 - `cargo build`, `cargo clippy`, `cargo fmt`, `cargo test`.
 - Bez sprzętu: `cargo run -- --simulate` (`MockTransport`).
