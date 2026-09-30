@@ -475,6 +475,30 @@ pióra w uchwycie tak, żeby papier wypadał *w środku* 10 mm skoku Z, a nie na
 poniżej 0,1 mm (najkrótszy 0,056 mm) — takie zostawiają kropkę, nie kreskę. Ale to kiepsko
 tłumaczy różnicę wobec referencji, która trzyma pióro na papierze *krócej* niż my.
 
+*Ciąg dalszy (2026-09-30) — tesseract A1, job ~1790607557101~, 27 806 kresek, trzy sesje.*
+Z zahomowaną ramką (~$H~ przed plotem, ~pen_down_z = 5.0~, zapas osi 5 mm) i z dociskiem
+sprawdzonym przez użytkownika kresek nadal brakuje. Co już wiadomo:
+| host | SVG 27 806 podścieżek = plan 27 806 kresek, 622 891 op, każde z ~ok~ (✔) |
+| wygląd | kreska jest *cała albo wcale*, sąsiednie ostre; brakują *grupy kolejnych* linii hatcha (sąsiednie linie idą po sobie, mediana przejazdu 0,41 mm) |
+| długie postoje | mapa kresek wg sesji (4 h i 15 h postoju między nimi): braki są we *wszystkich trzech* — postój przy stopie to nie przyczyna |
+| oś Z pod obciążeniem | ~fence --zcycle~: 800 cykli pióra, rzędy F5000/F1000 na przemian, *wszystkie kreski narysowane* — sama oś nie gubi kroków |
+| skala | objaw *tylko na bardzo dużych plotach* (słowa użytkownika) |
+*Żywa hipoteza (❓):* ~$1 = 254~ z ~$$~ (15.1). W zwykłym Grbl opróżniony planer to 254 ms
+bezruchu i *odcięcie prądu silników, Z też*; wirnik może wrócić o pełny krok, a pełny krok Z
+to ~0,19 mm (~$102 = 85.8~) — tyle, ile ma pasmo „rysuje/nie dotyka". Plot opróżnia planer
+tylko wtedy, gdy host nie nadąża, czyli rzadko — stąd tylko najdłuższe wydruki; bezruch
+z piórem na papierze to przy okazji kleks. Sprawdzenie bez 9-godzinnego plotu:
+~fence --zcycle --stall-ms 500~ (rzędy z wymuszonym przestojem przeplatane z kontrolnymi). ✱
+Instrument na plot: ~WARN~ „the planner was left without work" przy przerwie hosta ≥ 200 ms.
+
+*Wynik (2026-09-30): obalone.* ~--zcycle --stall-ms 500~: rzędy z przestojem co 5 kresek,
+przeplatane z kontrolnymi — *wszystkie kreski narysowane*, a silniki *cichną* w przestoju (prąd
+faktycznie odcinany, ~$1~ działa jak w Grblu). Odcięcie prądu nie przestawia Z. Użytkownik:
+*na dużych plotach tusz zawsze był*. Zostaje to, co zależy od długości wydruku i czego nie
+odtwarza 15-minutowa sonda. Dlatego od dziś każdy plot zapisuje pełny log drutu (§5): przy
+następnym dużym wydruku z brakami — miejsca braków na siatce mapy sesji → numery kresek →
+co działo się na drucie w tych chwilach.
+
 * 3. Funkcje
 ** 3.1 MVP
 - [ ] Auto-wykrycie i połączenie z iDraw (CH340, handshake, wersja, status ~?~).
