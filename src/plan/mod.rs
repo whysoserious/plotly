@@ -5,6 +5,7 @@
 //! (step 2.4) walks the plan and emits G-code.
 
 pub mod estimate;
+pub mod registration;
 pub mod svg;
 pub mod text;
 
@@ -154,6 +155,12 @@ pub struct PlanSettings {
     /// stops. The same ramp opens a stroke, where the nib is loading up
     /// instead.
     pub ramp_feed: u32,
+    /// How often to draw a registration mark, seconds of estimated plot time.
+    /// Zero, the default, draws none ([`registration`], §2.11).
+    pub registration_every_secs: f64,
+    /// Where the marks' cross goes: millimetres from the drawing's top-left
+    /// corner, before placement. The ticks run to the right of it.
+    pub registration_at_mm: Point,
 }
 
 impl Default for PlanSettings {
@@ -176,6 +183,11 @@ impl Default for PlanSettings {
             ramp_mm: 1.0,
             ramp_feed: 1000,
             ramp_angle_deg: 20.0,
+            // Off: a mark is ink on someone's sheet, so it has to be asked
+            // for, and only the operator knows where the sheet has room.
+            registration_every_secs: 0.0,
+            // Inside the 15 mm margin the generators leave round a page.
+            registration_at_mm: Point::new(5.0, 5.0),
         }
     }
 }

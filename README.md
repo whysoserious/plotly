@@ -329,6 +329,17 @@ rather than remembered:
 grep "machine profile" "$(ls -t logs/*.log | head -1)"
 ```
 
+### Registration marks
+
+Off by default. With `registration_every_mins = 10` in the profile section,
+every ten minutes of estimated plot time (and at the start and the end) the
+plan draws a small cross at `registration_at_mm` — `[x, y]` from the drawing's
+top-left corner, `[5.0, 5.0]` unless set — and a tick in a row to the right of
+it. The cross is the same every time, so if the machine loses steps the later
+crosses land beside the first one, off by the slip; the ticks date it, and each
+one is logged as `registration mark drawn` with its stroke number. Put the
+marks where the sheet is blank. Why this exists: `DESIGN.org` §2.11.
+
 Built-in profiles: `idraw-a0` (841×1189), `idraw-a1` (864×594), `idraw-a2`
 (594×432), `idraw-a3` (430×297), `idraw-a4` (300×210), `idraw-xlx` (595×218),
 `idraw-b6` (190×140), `idraw-minikit` (160×101.6) — millimetres.

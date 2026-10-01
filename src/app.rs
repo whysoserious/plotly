@@ -355,6 +355,9 @@ impl App {
             return;
         };
         if progress.done != self.strokes_done {
+            if progress.done > self.strokes_done {
+                self.log_registration_marks(self.strokes_done..progress.done);
+            }
             self.strokes_done = progress.done;
             tracing::debug!(
                 strokes = progress.done,
@@ -363,6 +366,26 @@ impl App {
                 drawn_mm = progress.drawn_mm,
                 "strokes drawn"
             );
+        }
+    }
+
+    /// Say when a registration mark has finished, at INFO: its tick on the
+    /// paper and this line in the log are the two halves of the clock that
+    /// dates a slip (§2.11). A mark is done when its last stroke is.
+    fn log_registration_marks(&self, finished: std::ops::Range<usize>) {
+        let Some(plan) = &self.plan else {
+            return;
+        };
+        for index in finished {
+            let label = plan.strokes.get(index).and_then(|s| s.label.as_deref());
+            let next = plan.strokes.get(index + 1).and_then(|s| s.label.as_deref());
+            if crate::plan::registration::is_mark(label) && next != label {
+                tracing::info!(
+                    mark = label.unwrap_or_default(),
+                    stroke = index,
+                    "registration mark drawn"
+                );
+            }
         }
     }
 

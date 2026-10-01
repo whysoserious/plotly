@@ -213,6 +213,8 @@ impl Profile {
             junction_deviation_mm,
             z_max_feed,
             z_accel_mm_s2,
+            registration_every_mins,
+            registration_at_mm,
         } = *over;
 
         set(&mut self.field.width_mm, width_mm);
@@ -242,6 +244,14 @@ impl Profile {
         set(&mut self.junction_deviation_mm, junction_deviation_mm);
         set(&mut self.z_max_feed, z_max_feed);
         set(&mut self.z_accel_mm_s2, z_accel_mm_s2);
+        set(
+            &mut self.plan.registration_every_secs,
+            registration_every_mins.map(|mins| mins.max(0.0) * 60.0),
+        );
+        set(
+            &mut self.plan.registration_at_mm,
+            registration_at_mm.map(|[x, y]| crate::geometry::Point::new(x, y)),
+        );
     }
 
     /// The firmware settings this profile wants that the board does not
@@ -481,6 +491,9 @@ pub fn resolve(
         // have to do, and the one number that says whether the pen is
         // pressing on paper or on its own end stop (§2.11).
         pen_headroom_mm = ?profile.pen_headroom_mm(),
+        // Zero is off. Logged so a sheet without marks can be told apart from
+        // a run that never asked for them (§2.11).
+        registration_every_mins = profile.plan.registration_every_secs / 60.0,
         "machine profile"
     );
     profile.check_pen_travel();

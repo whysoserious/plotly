@@ -168,7 +168,8 @@ pub fn build_plan(
     profile: &profiles::Profile,
 ) -> plan::Plan {
     let field = profile.field;
-    let placement = match bounds_of(shapes) {
+    let bounds = bounds_of(shapes);
+    let placement = match bounds {
         Some(bounds) => {
             let placement = geometry::Placement::anchored_at(bounds, &field, DEFAULT_MARGIN_MM, at);
             let (min, max) = placement.place_bounds(bounds);
@@ -198,8 +199,12 @@ pub fn build_plan(
     };
 
     let settings = profile.plan;
-    let job = plan::Plan::build_shapes(shapes, &placement, &settings);
-    let dry_run = job.estimate(&plan::estimate::Machine::from_profile(profile));
+    let machine = plan::estimate::Machine::from_profile(profile);
+    let mut job = plan::Plan::build_shapes(shapes, &placement, &settings);
+    if let (Some((min, _)), true) = (bounds, settings.registration_every_secs > 0.0) {
+        job = with_registration_marks(job, shapes, min, &placement, &machine, profile);
+    }
+    let dry_run = job.estimate(&machine);
     tracing::debug!(
         ops = job.ops.len(),
         strokes = job.stroke_count(),
@@ -211,6 +216,65 @@ pub fn build_plan(
         cap_mm = settings.max_segment_mm,
         "plan built"
     );
+    job
+}
+
+/// Rebuild `job` with registration marks interleaved (§2.11), timed by the
+/// estimate of the plan without them.
+///
+/// The placement is the drawing's own, worked out before the marks existed,
+/// so asking for marks never moves the drawing on the sheet.
+fn with_registration_marks(
+    job: plan::Plan,
+    shapes: &[plan::Shape],
+    drawing_min: geometry::Point,
+    placement: &geometry::Placement,
+    machine: &plan::estimate::Machine,
+    profile: &profiles::Profile,
+) -> plan::Plan {
+    let settings = &profile.plan;
+    let at = geometry::Point::new(
+        drawing_min.x + settings.registration_at_mm.x,
+        drawing_min.y + settings.registration_at_mm.y,
+    );
+    let starts = plan::estimate::stroke_start_secs(&job, machine);
+    let marked =
+        plan::registration::interleave(shapes, &starts, settings.registration_every_secs, at);
+    let job = plan::Plan::build_shapes(&marked, placement, settings);
+
+    // Three strokes to a mark: the cross's two arms and the tick.
+    let marks = job
+        .strokes
+        .iter()
+        .filter(|s| plan::registration::is_mark(s.label.as_deref()))
+        .count()
+        / 3;
+    let cross = placement.place(at);
+    tracing::info!(
+        marks,
+        every_mins = settings.registration_every_secs / 60.0,
+        cross_x = cross.x,
+        cross_y = cross.y,
+        "registration marks planned"
+    );
+    // Off the field is off the paper too, most likely. Say it before the
+    // carriage tries.
+    let field = profile.field;
+    let last = plan::registration::mark(marks.saturating_sub(1), at);
+    for p in last
+        .iter()
+        .flat_map(|s| &s.points)
+        .map(|p| placement.place(*p))
+    {
+        if !field.contains(p) {
+            tracing::warn!(
+                x = p.x,
+                y = p.y,
+                "registration marks run off the field; move registration_at_mm"
+            );
+            break;
+        }
+    }
     job
 }
 
@@ -264,4 +328,84 @@ fn run_tui(
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     app::App::new(worker, machine, profile, shapes, source, resume, log).run(&mut terminal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geometry::Point;
+
+    /// A hatch of `n` vertical lines, 1 mm apart and 50 mm long, in a box that
+    /// starts at (20, 30) — long enough to need a few marks at a short interval.
+    fn hatch(n: usize) -> Vec<plan::Shape> {
+        (0..n)
+            .map(|i| {
+                let x = 20.0 + i as f64;
+                plan::Shape::unlabelled(vec![Point::new(x, 30.0), Point::new(x, 80.0)])
+            })
+            .collect()
+    }
+
+    fn profile(every_secs: f64) -> profiles::Profile {
+        let mut profile = profiles::Profile::builtin(profiles::DEFAULT_PROFILE).unwrap();
+        profile.plan.registration_every_secs = every_secs;
+        profile
+    }
+
+    fn mark_strokes(job: &plan::Plan) -> Vec<&plan::Stroke> {
+        job.strokes
+            .iter()
+            .filter(|s| plan::registration::is_mark(s.label.as_deref()))
+            .collect()
+    }
+
+    /// Off by default: a plain run puts nothing on the sheet that the drawing
+    /// did not ask for.
+    #[test]
+    fn no_marks_unless_asked_for() {
+        let job = build_plan(&hatch(40), Point::new(0.0, 0.0), &profile(0.0));
+        assert!(mark_strokes(&job).is_empty());
+        assert_eq!(job.stroke_count(), 40);
+    }
+
+    /// Asked for, the marks open and close the plot and recur in between,
+    /// their cross sits where the config put it relative to the drawing, and
+    /// the drawing itself lands exactly where it would have without them.
+    #[test]
+    fn marks_bracket_the_plot_and_leave_the_drawing_where_it_was() {
+        let at = Point::new(100.0, 200.0);
+        let plain = build_plan(&hatch(40), at, &profile(0.0));
+        let marked = build_plan(&hatch(40), at, &profile(5.0));
+
+        let marks = mark_strokes(&marked);
+        assert!(
+            marks.len() >= 9,
+            "start, end and a few between: {}",
+            marks.len()
+        );
+        assert_eq!(marks.len() % 3, 0);
+        assert!(plan::registration::is_mark(
+            marked.strokes[0].label.as_deref()
+        ));
+        assert!(plan::registration::is_mark(
+            marked.strokes.last().unwrap().label.as_deref()
+        ));
+
+        // The drawing's own strokes are the same strokes, in the same places.
+        let drawing: Vec<Point> = marked
+            .strokes
+            .iter()
+            .filter(|s| s.label.is_none())
+            .map(|s| s.start)
+            .collect();
+        let before: Vec<Point> = plain.strokes.iter().map(|s| s.start).collect();
+        assert_eq!(drawing, before);
+
+        // The cross is 5 mm right and down from the drawing's top-left corner,
+        // which the head anchored at `at`: its horizontal arm starts 1.5 mm
+        // left of that.
+        let cross = marks[0].start;
+        assert!((cross.x - (at.x + 5.0 - 1.5)).abs() < 1e-9, "{cross:?}");
+        assert!((cross.y - (at.y + 5.0)).abs() < 1e-9, "{cross:?}");
+    }
 }

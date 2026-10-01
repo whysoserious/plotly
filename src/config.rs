@@ -97,6 +97,12 @@ pub struct ProfileOverride {
     /// runtime, and this is one of the two numbers that decide what one costs
     /// (§2.10).
     pub z_accel_mm_s2: Option<f64>,
+    /// Draw a registration mark every this many minutes of estimated plot
+    /// time, so a slip of the machine shows on the paper (§2.11). Zero is off.
+    pub registration_every_mins: Option<f64>,
+    /// Where the marks go, `[x, y]` mm from the drawing's top-left corner: the
+    /// centre of the cross, with the ticks running right from it.
+    pub registration_at_mm: Option<[f64; 2]>,
 }
 
 /// Why a config file could not be used.
@@ -219,6 +225,8 @@ mod tests {
             junction_deviation_mm = 0.002
             z_max_feed = 11000
             z_accel_mm_s2 = 4200.0
+            registration_every_mins = 10.0
+            registration_at_mm = [4.0, 6.5]
             "#,
         )
         .expect("valid config");
@@ -244,6 +252,8 @@ mod tests {
         assert_eq!(o.junction_deviation_mm, Some(0.002));
         assert_eq!(o.z_max_feed, Some(11000));
         assert_eq!(o.z_accel_mm_s2, Some(4200.0));
+        assert_eq!(o.registration_every_mins, Some(10.0));
+        assert_eq!(o.registration_at_mm, Some([4.0, 6.5]));
     }
 
     /// `default.conf` is the documentation for this struct, so it has to stay
@@ -280,6 +290,8 @@ mod tests {
             junction_deviation_mm,
             z_max_feed,
             z_accel_mm_s2,
+            registration_every_mins,
+            registration_at_mm,
         } = over;
         let documented = [
             ("width_mm", width_mm.is_some()),
@@ -302,6 +314,8 @@ mod tests {
             ("junction_deviation_mm", junction_deviation_mm.is_some()),
             ("z_max_feed", z_max_feed.is_some()),
             ("z_accel_mm_s2", z_accel_mm_s2.is_some()),
+            ("registration_every_mins", registration_every_mins.is_some()),
+            ("registration_at_mm", registration_at_mm.is_some()),
         ];
         let missing: Vec<&str> = documented
             .iter()
@@ -346,6 +360,12 @@ mod tests {
             documented.junction_deviation_mm,
             Some(built_in.junction_deviation_mm)
         );
+        assert_eq!(
+            documented.registration_every_mins,
+            Some(built_in.plan.registration_every_secs / 60.0)
+        );
+        let at = built_in.plan.registration_at_mm;
+        assert_eq!(documented.registration_at_mm, Some([at.x, at.y]));
     }
 
     /// A typo must not be swallowed: the user believes the setting is live.

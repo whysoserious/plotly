@@ -103,6 +103,25 @@ impl Estimate {
 
 /// Dry-run `plan` on `machine` and report the time and distances.
 pub fn estimate(plan: &Plan, machine: &Machine) -> Estimate {
+    walk(plan, machine, |_| {})
+}
+
+/// When each stroke starts, in seconds from the start of the plan: one entry
+/// per [`Op::PenDown`], in plan order, which is one per [`crate::plan::Stroke`].
+///
+/// The moment counted is the one the pen begins to come down, so everything
+/// before it — the travel to the stroke included — is already paid for. Same
+/// model as [`estimate`], so the same optimism: the clock runs a few percent
+/// behind these figures.
+pub fn stroke_start_secs(plan: &Plan, machine: &Machine) -> Vec<f64> {
+    let mut starts = Vec::new();
+    walk(plan, machine, |secs| starts.push(secs));
+    starts
+}
+
+/// The dry run itself. `at_pen_down` is told the running total each time the
+/// plan lowers the pen.
+fn walk(plan: &Plan, machine: &Machine, mut at_pen_down: impl FnMut(f64)) -> Estimate {
     let mut out = Estimate {
         secs: 0.0,
         draw_mm: 0.0,
@@ -150,6 +169,9 @@ pub fn estimate(plan: &Plan, machine: &Machine) -> Estimate {
             // pen is already up.
             Op::PenUp | Op::PenDown => {
                 let target = matches!(op, Op::PenDown);
+                if target {
+                    at_pen_down(out.secs);
+                }
                 if run.pen_down != target {
                     run.pen_down = target;
                     out.secs += if target {
@@ -553,5 +575,31 @@ mod tests {
             quick.pen_up_secs
         );
         assert_eq!(quick.accel_mm_s2, profile.accel_mm_s2);
+    }
+
+    /// One start time per stroke, in order, and each one counts everything
+    /// before it: the travel to a stroke is paid by the time its pen comes down.
+    #[test]
+    fn every_stroke_gets_the_time_its_pen_comes_down() {
+        let plan = Plan::build_shapes(
+            &[
+                Shape::unlabelled(vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)]),
+                Shape::unlabelled(vec![Point::new(100.0, 50.0), Point::new(0.0, 50.0)]),
+                Shape::unlabelled(vec![Point::new(0.0, 100.0), Point::new(100.0, 100.0)]),
+            ],
+            &Placement::identity(),
+            &PlanSettings::default(),
+        );
+        let starts = stroke_start_secs(&plan, &machine());
+        let total = estimate(&plan, &machine()).secs;
+
+        assert_eq!(starts.len(), plan.stroke_count());
+        // The first stroke starts where the head already is: nothing to pay.
+        assert_eq!(starts[0], 0.0);
+        // A 100 mm line at F2000 alone is three seconds, so each later start
+        // is at least that far along.
+        assert!(starts[1] > starts[0] + 3.0, "{starts:?}");
+        assert!(starts[2] > starts[1] + 3.0, "{starts:?}");
+        assert!(starts[2] < total, "{starts:?} vs {total}");
     }
 }
