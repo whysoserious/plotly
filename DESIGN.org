@@ -398,7 +398,7 @@ robi jedno i drugie w vpype przed wczytaniem pliku.
 biegnie ~12% optymistycznie wobec jedynego zegara, jaki mamy (2:31:43 wobec zmierzonych
 2:51:54), i winny jest znany człon ruchu pióra z 2.6.
 
-** 2.11 Brakujące kreski: host jest niewinny, podejrzany to koniec osi Z (2026-09-18)
+** 2.11 Brakujące kreski: host jest niewinny, przyczyną są uskoki XY w trakcie plotu (2026-09-18 → 2026-10-01)
 *Objaw:* w kilku kolejnych wydrukach *kilku kresek po prostu nie ma na papierze*, w bardzo
 różnych miejscach kartki. Są w SVG i rysuje je oryginalny sterownik.
 
@@ -498,6 +498,43 @@ faktycznie odcinany, ~$1~ działa jak w Grblu). Odcięcie prądu nie przestawia 
 odtwarza 15-minutowa sonda. Dlatego od dziś każdy plot zapisuje pełny log drutu (§5): przy
 następnym dużym wydruku z brakami — miejsca braków na siatce mapy sesji → numery kresek →
 co działo się na drucie w tych chwilach.
+
+*Ciąg dalszy (2026-10-01) — ustalone: maszyna gubi pozycję w XY, a „brak" to kreska narysowana
+na innej kresce.* Job ~1790848078383~: ~blocks city … A4-portrait pen0.5~ (p5js13), 8668 kresek,
+1:29:15, log ~logs/2026-10-01 11.44.16 output.log~ z kopią SVG obok. Dane: zdjęcie całego arkusza
+(~9 px/mm, prawie z góry) i zbliżenie pod kątem, na którym użytkownik dorysował niebieskim
+brakujące kreski. Zdjęcia zarejestrowane do renderu SVG: SIFT zbliżenie → całość, homografia na
+narożnikach rysunku + ECC, potem piramida kafli z korektą wielomianową; przesunięcia mierzone
+dopasowaniem renderu wybranych kresek do tuszu na zdjęciu.
+| host | każdy z 8668 elementów SVG pokryty w logu ruchami przy ~Z5.000~ (tolerancja 0,05 mm) ✔ |
+| uskoki | grupy kolejnych kresek mierzone względem kresek z *innego czasu w tym samym miejscu kartki* (zniekształcenie zdjęcia się znosi): trzy okresy stałego położenia — #4…~#1250: (−0,6, −0,45) mm; #1280–#4499: odniesienie; od *#4500* (12:55:26): *(+2,05, −0,85) mm*. Ten sam wektor w każdej komórce 20×20 mm, ostry skok między grupą #4488–4499 a #4500–4511 |
+| hibernacja | komputer zasnął przy kresce #1920 na 20 min 41 s (12:08:18 → 12:28:59), pióro na papierze, silniki odcięte (~$1 = 254~) — *bez uskoku*: kreski sprzed i zza przerwy w tych samych miejscach różnią się o ≤ 0,2 mm |
+| model | homografia + korekta z wbudowanymi uskokami: 90. percentyl residuum 1,6–1,7 mm → 0,44 mm, wszystkie kafle się dopasowują |
+| braki | sam model uskoków przewiduje *153 puste miejsca po liniach hatcha* (40 z pierwszego okresu, 113 z trzeciego), w tym 7 z 8 zaznaczonych na niebiesko; 5 przewidzianych, a *niezaznaczonych*, obejrzanych na zdjęciu — w każdym goły papier. 416 z 1725 przesuniętych linii hatcha leży na innym tuszu |
+| w drugą stronę | test „z kreską / bez kreski" na poprzecznym profilu ±2 mm, dla 1086 linii hatcha mierzalnych osobno: 1081 narysowanych, 5 niejednoznacznych, a dwie najsilniejsze mają ciemną linię 0,3–0,5 mm obok. *Ani jednej kreski, której pióro nie narysowało* |
+| ślad fizyczny | dwie linie przy dziurze ~#4773~/~#4774~ mają 0,7–0,8 mm szerokości (11,5–13,5 px przy 7–9 px reszty): to ~#2194~/~#2193~ z drugą kreską 0,2 mm obok. Ostatni zaznaczony brak, ~#4101~, jest narysowany — pustkę obok zrobiła czarna ściana (~#6124~+) przesunięta o 2 mm |
+Mechanizm: hatch co 1 mm i uskok w x ≈ 2 podziałki, więc linie spod drugiego okresu lądują
+na liniach sprzed niego, a ich własne miejsca zostają puste. Oko widzi dziurę, nie widzi
+pogrubionej sąsiadki. To jest dokładnie sygnatura z tej sekcji: grupy *kolejnych* linii hatcha,
+cała albo wcale, sąsiednie ostre, tylko na długich plotach — bo im dłużej, tym więcej szans na
+uskok i tym więcej hatcha rysowanego „po" obok hatcha „przed". Tam, gdzie uskok nie trafia
+w wielokrotność podziałki, nic nie znika, tylko krawędzie się dublują — na zdjęciu takich
+podwójnych obrysów jest sporo.
+
+Na drucie w chwili uskoku nic: krótkie kreski i przejazdy przy F2000/F1000 w okolicy
+(75–85, 25–30) mm — więc to nie szybki przejazd. ❓ Przyczyna mechaniczna nieustalona: śruby kół
+pasowych na wałkach, napięcie pasków, coś na stole w drodze karetki, pióro zaczepiające
+o przemoczony, zmechacony papier (na tym rysunku 90 m linii stalówką 0,5 mm na kartce A4). ❓ Czy tesseract A1
+i wcześniejsze miały te same uskoki — nie sprawdzone, nie ma zdjęcia.
+
+Hipotezy z tej sekcji — koniec osi Z, ~$1~, docisk — przestają być potrzebne: host był niewinny
+i jest, a pióro rysowało. Plotly nie wykryje uskoku samo (otwarta pętla), więc od teraz papier
+liczy za nie: *znaki rejestracji* (~registration_every_mins~, ~registration_at_mm~,
+~src/plan/registration.rs~). Co N minut estymaty, plus na starcie i na końcu: krzyżyk *zawsze
+w tym samym miejscu* (po uskoku następne lądują obok, o wektor uskoku) i kreska-licznik w rzędzie
+obok (rząd ma schodek w przedziale, w którym był uskok); każdy znak to INFO
+~registration mark drawn~ z numerem kreski. Domyślnie wyłączone — to tusz na czyimś arkuszu.
+✱ Włączyć na następnym długim plocie i sprawdzić krzyżyk lupą.
 
 * 3. Funkcje
 ** 3.1 MVP
