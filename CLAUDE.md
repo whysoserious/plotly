@@ -50,7 +50,8 @@ Implementujemy plan z **sekcji 14** krok po kroku. Dla **każdego** kroku, po na
 - Bez sprzętu: `cargo run -- --simulate` (`MockTransport`).
 - Logi idą do **pliku**, nie na stdout — TUI zajmuje terminal (DESIGN.org §5). Jeden plik na
   uruchomienie: `./logs/<data godzina> <rysunek>.log` (git-ignorowane), domyślnie poziom
-  `trace` — cały ruch na drucie ze stemplem w µs. Stary `./plotly.log` to historia sprzed
+  `trace` — cały ruch na drucie ze stemplem w µs. Obok każdego logu kopia rysunku pod tą samą
+  nazwą z `.svg`. Stary `./plotly.log` to historia sprzed
   2026-09-30.
 
 ## Commity

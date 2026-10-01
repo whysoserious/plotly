@@ -309,6 +309,40 @@ fn log_header(args: &Args, path: &Path) {
     }
 }
 
+/// Where the copy of the drawing goes: next to the log, under the same name
+/// with `.svg` — `logs/<stamp> <drawing>.log` keeps `logs/<stamp> <drawing>.svg`.
+pub fn drawing_copy_path(log: &Path) -> PathBuf {
+    let copy = log.with_extension("svg");
+    if copy != log {
+        return copy;
+    }
+    // A log asked for by `--log-file x.svg` must not be overwritten by its own drawing.
+    let mut name = log.as_os_str().to_owned();
+    name.push(".drawing.svg");
+    PathBuf::from(name)
+}
+
+/// Keep the exact bytes of the drawing this run loads, next to its log.
+///
+/// The source file does not stay put: `vpype-process.sh` writes every result
+/// to the same `output.svg`, so by the time a plot is questioned the file the
+/// log names is usually a different drawing. The copy is what was parsed —
+/// written from the same buffer, before parsing, so even an SVG that fails to
+/// load is kept. A failed copy is a warning: the plot does not depend on it.
+pub fn keep_drawing(log: &Path, data: &[u8]) -> Option<PathBuf> {
+    let copy = drawing_copy_path(log);
+    match std::fs::write(&copy, data) {
+        Ok(()) => {
+            tracing::info!(copy = %copy.display(), bytes = data.len(), "drawing copied next to the log");
+            Some(copy)
+        }
+        Err(err) => {
+            tracing::warn!(copy = %copy.display(), %err, "could not keep a copy of the drawing");
+            None
+        }
+    }
+}
+
 /// Split a log path into `(directory, file_name)`, defaulting to the CWD.
 fn split_log_path(path: &Path) -> (PathBuf, PathBuf) {
     let dir = path
@@ -398,6 +432,43 @@ mod tests {
             split_log_path(Path::new("./logs/run.log")),
             (PathBuf::from("./logs"), PathBuf::from("run.log"))
         );
+    }
+
+    #[test]
+    fn the_drawing_copy_shares_the_log_name() {
+        assert_eq!(
+            drawing_copy_path(Path::new("logs/2026-09-30 12.58.24 output.log")),
+            PathBuf::from("logs/2026-09-30 12.58.24 output.svg")
+        );
+        // Dots in the stamp and the drawing's own name are not an extension.
+        assert_eq!(
+            drawing_copy_path(Path::new("logs/2026-09-30 12.58.24 pen3 12.44.16.log")),
+            PathBuf::from("logs/2026-09-30 12.58.24 pen3 12.44.16.svg")
+        );
+        assert_eq!(
+            drawing_copy_path(Path::new("run")),
+            PathBuf::from("run.svg")
+        );
+        assert_eq!(
+            drawing_copy_path(Path::new("run.svg")),
+            PathBuf::from("run.svg.drawing.svg")
+        );
+    }
+
+    #[test]
+    fn keep_drawing_writes_the_bytes_it_was_given() {
+        let dir = std::env::temp_dir().join(format!("plotly-test-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("2026-09-30 12.58.24 output.log");
+        let data = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+
+        let copy = keep_drawing(&log, data).expect("the directory is writable");
+        assert_eq!(copy, dir.join("2026-09-30 12.58.24 output.svg"));
+        assert_eq!(std::fs::read(&copy).unwrap(), data);
+
+        let missing = dir.join("no such dir").join("x.log");
+        assert!(keep_drawing(&missing, data).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

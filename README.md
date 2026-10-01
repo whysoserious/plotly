@@ -338,6 +338,7 @@ Built-in profiles: `idraw-a0` (841×1189), `idraw-a1` (864×594), `idraw-a2`
 | What | Where |
 |---|---|
 | Log files | one per run: `./logs/<YYYY-MM-DD HH.MM.SS> <drawing>.log` (`--log-file` for another path). Level `trace` by default — every G-code line and every reply, microsecond timestamps, nothing dropped — so a big plot writes a few hundred MB; `--log-level info` for a small log, `--no-log` for none. The first lines record the version, the command line, the working directory and the drawing's full path, size and modification time. The path is printed when plotly exits. `logs/` is git-ignored. |
+| Drawing copy | the SVG of every run is saved next to its log under the same name, `./logs/<YYYY-MM-DD HH.MM.SS> <drawing>.svg` — the exact bytes that were parsed, so a log can be replayed against its drawing after `output.svg` has been overwritten. Not written with `--no-log` or for `--text`. |
 | Live log tail | bottom panel of the TUI (last 1000 lines, `info` and up) |
 | Job directories | `~/.local/share/plotly/jobs/<job_id>/` |
 | Config | `~/.config/plotly/config.toml` |

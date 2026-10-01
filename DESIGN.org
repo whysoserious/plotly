@@ -679,6 +679,10 @@ i zdebugować błąd. Czyli logi muszą być: ze znacznikiem czasu (ms), z pozio
   (~logs/~ w ~.gitignore~). Wcześniej był jeden ~./plotly.log~ (append) — przy wydrukach po
   kilka godzin pytanie zawsze dotyczy jednego plotu, a nazwa z czasem i rysunkiem znajduje go
   bez otwierania. Ścieżka jest wypisywana przy wyjściu.
+- /Od 2026-10-01:/ obok logu leży *kopia rysunku*, ~<ta sama nazwa>.svg~ — bajty wczytane raz
+  i z tego samego bufora zapisane oraz sparsowane (także gdy parsowanie się wywali). Powód:
+  ~vpype-process.sh~ nadpisuje zawsze ten sam ~output.svg~, więc ścieżka w nagłówku logu po
+  dniu wskazuje już inny rysunek. Bez logu (~--no-log~) i dla ~--text~ kopii nie ma.
 - ~--log-file <PATH>~ — własny plik.
 - ~--log-level <off|info|debug|trace>~, *domyślnie ~trace~* (życzenie użytkownika: „bardzo
   głośne logi, żeby potem nie było problemów z debugiem"). Log plotu nie da się podkręcić

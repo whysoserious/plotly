@@ -28,7 +28,7 @@ pub fn run() -> io::Result<()> {
     let args = cli::Args::parse();
     // Keep the appender guard alive for the whole run so logs flush on exit.
     let logging = logging::init(&args);
-    let result = run_with(&args, logging.ring.clone());
+    let result = run_with(&args, logging.ring.clone(), logging.path.as_deref());
     // The terminal is ours again, whether the TUI ran or startup failed: say
     // where the record of this run is, while the name is on screen to copy.
     if let Some(path) = &logging.path {
@@ -38,7 +38,12 @@ pub fn run() -> io::Result<()> {
 }
 
 /// Everything after logging: load the drawing, greet the plotter, run the TUI.
-fn run_with(args: &cli::Args, log: logging::LogRing) -> io::Result<()> {
+/// `log_path` is this run's log file, which the drawing's copy is named after.
+fn run_with(
+    args: &cli::Args,
+    log: logging::LogRing,
+    log_path: Option<&std::path::Path>,
+) -> io::Result<()> {
     if args.panic_test {
         panic!("synthetic panic to exercise the logging panic hook");
     }
@@ -55,7 +60,7 @@ fn run_with(args: &cli::Args, log: logging::LogRing) -> io::Result<()> {
         polylines.into_iter().map(plan::Shape::unlabelled).collect()
     } else {
         match &args.svg_file {
-            Some(path) => match plan::svg::load(path) {
+            Some(path) => match load_svg(path, log_path) {
                 Ok(svg) => {
                     tracing::info!(
                         file = %path.display(),
@@ -136,6 +141,19 @@ fn run_with(args: &cli::Args, log: logging::LogRing) -> io::Result<()> {
         );
     }
     run_tui(driver, profile, shapes, source, resume, log)
+}
+
+/// Read the SVG once, keep those bytes next to the log, then parse the same
+/// bytes — the copy is exactly what this run drew, not what the path holds later.
+fn load_svg(
+    path: &std::path::Path,
+    log_path: Option<&std::path::Path>,
+) -> Result<plan::svg::Svg, plan::svg::SvgError> {
+    let data = std::fs::read(path).map_err(plan::svg::SvgError::Read)?;
+    if let Some(log_path) = log_path {
+        logging::keep_drawing(log_path, &data);
+    }
+    plan::svg::from_bytes(&data, plan::svg::DEFAULT_TOLERANCE_MM)
 }
 
 /// Build the plan to draw, with the shapes (mm) laid down from `at` — the
